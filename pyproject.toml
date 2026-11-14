@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polylogue"
-version = "0.3.2"
+version = "0.3.3"
 description = "让多个 AI 在一个房间里会商：能同时问、也能互相点名接话，带成本硬顶和收敛检测"
 readme = "README.md"
 requires-python = ">=3.9"
