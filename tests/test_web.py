@@ -1,7 +1,7 @@
-"""端到端测试：假上游 + 真 HTTP + 真 SSE。
+"""工作台 HTTP 接口的测试。
 
-这条测试证明的不是「函数返回对不对」，而是「浏览器打开能用的那条链路通不通」：
-HTTP 请求 → 房间管理 → 会话编排 → 并行调用 → SSE 推回。
+用真的 HTTP 服务（端口 0 让系统分配），不是 mock —— 之前出过
+「接口改了但测试还在测旧路由」的问题，端到端才能抓到。
 """
 
 import http.client
@@ -10,414 +10,606 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
+from urllib.parse import quote
 
-from polylogue.guard import Budget
+from polylogue import avatars, config, credentials, store
 from polylogue.web import serve
 
-
-class FakeUpstream(BaseHTTPRequestHandler):
-    """假的 OpenAI 兼容服务。"""
-
-    protocol_version = "HTTP/1.1"
-    hits = 0
-    lock = threading.Lock()
-
-    def log_message(self, fmt, *args):
-        pass
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(length) or b"{}")
-
-        last = ""
-        for m in body.get("messages", []):
-            if m.get("role") == "user":
-                last = m.get("content", "")
-
-        with FakeUpstream.lock:
-            FakeUpstream.hits += 1
-            n = FakeUpstream.hits
-
-        payload = {
-            "choices": [{"message": {"content": f"回复{n}：看到了「{last[-40:]}」"}}],
-            "usage": {"prompt_tokens": 11, "completion_tokens": 7},
-        }
-        data = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+ROOT = Path(__file__).resolve().parent.parent
 
 
-class WebCase(unittest.TestCase):
+class FakeUpstream:
+    """假的上游模型服务。返回 OpenAI 兼容结构，不联网。"""
+
+    def __init__(self, reply="好的，我看到了。"):
+        self.reply = reply
+        self.requests = []
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                outer.requests.append(body)
+                data = json.dumps(
+                    {
+                        "choices": [{"message": {"content": outer.reply}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def base_url(self):
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class Live:
+    """起一个隔离的工作台（独立配置目录 + 摘掉 API key 的环境变量）。
+
+    注意：只摘 API key，**不要** `clear=True` 清空整个环境。
+    Windows 的 winsock / OpenSSL 初始化依赖 SYSTEMROOT，清空后连 socket
+    都建不起来（WinError 10106），看起来像产品挂了，其实是测试把环境拆了。
+    """
+
+    KEY_VARS = (
+        "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY",
+        "GROQ_API_KEY", "MISTRAL_API_KEY", "TOGETHER_API_KEY", "LLM_API_KEY",
+    )
+
+    def __init__(self, with_key=False):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.cfg = base / "config.json"
+
+        self.patches = [
+            mock.patch.object(config, "CONFIG_PATH", self.cfg),
+            mock.patch.object(credentials, "DSH_CREDENTIALS", base / "none.yaml"),
+            mock.patch.object(credentials, "OWN_CONFIG", self.cfg),
+        ]
+        for p in self.patches:
+            p.start()
+
+        env = {k: v for k, v in os.environ.items() if k not in self.KEY_VARS}
+        if with_key:
+            env["OPENROUTER_API_KEY"] = "sk-or-v1-test"
+        self.env = mock.patch.dict(os.environ, env, clear=True)
+        self.env.start()
+
+        self.ready = threading.Event()
+        holder = {}
+        self.thread = threading.Thread(
+            target=serve,
+            kwargs={"port": 0, "on_ready": lambda url: (holder.__setitem__("u", url), self.ready.set())},
+            daemon=True,
+        )
+        self.thread.start()
+        if not self.ready.wait(20):
+            raise RuntimeError("工作台没起来")
+        self.host = holder["u"].split("://")[1]
+
+    def req(self, method, path, body=None, timeout=120):
+        conn = http.client.HTTPConnection(self.host, timeout=timeout)
+        payload = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        # http.client 只接受 latin-1，中文路径必须自己编码
+        conn.request(method, quote(path, safe="/?=&%:"), body=payload, headers=headers)
+        r = conn.getresponse()
+        raw = r.read()
+        ctype = r.getheader("Content-Type") or ""
+        conn.close()
+        if "json" in ctype:
+            return r.status, (json.loads(raw) if raw else {})
+        return r.status, raw.decode("utf-8", "replace")
+
+    def stop(self):
+        self.env.stop()
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
+
+
+class TestStatic(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeUpstream)
-        cls.upstream_url = f"http://127.0.0.1:{cls.upstream.server_address[1]}/v1"
-        threading.Thread(target=cls.upstream.serve_forever, daemon=True).start()
+        cls.live = Live()
 
-        ready = threading.Event()
-        holder = {}
+    @classmethod
+    def tearDownClass(cls):
+        cls.live.stop()
 
-        def run():
-            serve(
-                ["fake1", "fake2"],
-                port=0,
-                budget=Budget(max_rounds=3, max_calls=6),
-                custom={"fake1": cls.upstream_url, "fake2": cls.upstream_url},
-                on_ready=lambda url: (holder.__setitem__("url", url), ready.set()),
-            )
-
-        threading.Thread(target=run, daemon=True).start()
-        if not ready.wait(10):
-            raise RuntimeError("polylogue web 没起来")
-        cls.base = holder["url"]
-        cls.host = cls.base.split("://")[1]
-
-    # ---------------------------------------------------------------- 工具
-
-    def request(self, method, path, body=None, timeout=30):
-        conn = http.client.HTTPConnection(self.host, timeout=timeout)
-        payload = None
-        headers = {}
-        if body is not None:
-            payload = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        conn.request(method, path, body=payload, headers=headers)
-        resp = conn.getresponse()
-        raw = resp.read()
-        ctype = resp.getheader("Content-Type") or ""
-        conn.close()
-        return resp.status, ctype, raw
-
-    def get_json(self, path):
-        status, _, raw = self.request("GET", path)
-        return status, json.loads(raw)
-
-    def say(self, room_id, text):
-        status, ctype, raw = self.request("POST", f"/api/rooms/{room_id}/say", {"text": text})
-        events = []
-        for chunk in raw.decode("utf-8").split("\n\n"):
-            chunk = chunk.strip()
-            if not chunk.startswith("data: "):
-                continue
-            try:
-                events.append(json.loads(chunk[6:]))
-            except ValueError:
-                pass
-        return status, ctype, events
-
-    def default_room(self):
-        _, info = self.get_json("/api/info")
-        return info["default_room"]
-
-
-class TestStatic(WebCase):
-    def test_index_is_workbench(self):
-        status, ctype, raw = self.request("GET", "/")
+    def test_index_served(self):
+        status, html = self.live.req("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn("text/html", ctype)
-        html = raw.decode("utf-8")
-        # 工作台该有的三块区域
-        self.assertIn("房间", html)
-        self.assertIn("polylogue", html)
-        self.assertIn("/api/rooms", html)
+        for marker in ("polylogue", 'id="log"', 'id="list"', 'id="btnTheme"'):
+            self.assertIn(marker, html)
 
     def test_no_external_resources(self):
-        """页面不能引任何外部资源，否则断网打不开。"""
-        _, _, raw = self.request("GET", "/")
-        html = raw.decode("utf-8")
-        for bad in ("cdn.", "unpkg", "jsdelivr", "googleapis", "//cdn"):
-            self.assertNotIn(bad, html, msg=f"页面引了外部资源：{bad}")
-
-
-class TestInfoAndRooms(WebCase):
-    def test_info_lists_providers(self):
-        status, info = self.get_json("/api/info")
+        """离线可用是硬要求：不能引 CDN、外部字体、外部图片。"""
+        status, html = self.live.req("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn("providers", info)
-        names = {p["name"] for p in info["providers"]}
-        # 主流厂商都要在列表里
-        for expected in ("openai", "claude", "gemini", "grok", "deepseek", "groq"):
-            self.assertIn(expected, names)
-        self.assertIn("default_room", info)
-        self.assertIn("price_table", info)
+        for bad in ("http://", "https://", "//cdn.", "@import url("):
+            self.assertNotIn(bad, html, f"前端引了外部资源：{bad}")
 
-    def test_provider_reports_availability(self):
-        """没配 key 的要标成不可用，而不是等用户点了才报错。"""
-        _, info = self.get_json("/api/info")
-        by_name = {p["name"]: p for p in info["providers"]}
-        self.assertFalse(by_name["openai"]["available"])
-        self.assertTrue(by_name["ollama"]["available"])  # 本地模型不需要 key
+    def test_has_both_themes(self):
+        status, html = self.live.req("GET", "/")
+        self.assertIn('data-theme="dark"', html)
+        self.assertIn(':root[data-theme="light"]', html)
 
-    def test_rooms_listed(self):
-        status, data = self.get_json("/api/rooms")
+
+class TestInfoAndContacts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.live = Live()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.live.stop()
+
+    def test_info_shape(self):
+        status, info = self.live.req("GET", "/api/info")
         self.assertEqual(status, 200)
-        self.assertGreaterEqual(len(data["rooms"]), 1)
-        room = data["rooms"][0]
-        self.assertEqual(room["members"], ["fake1", "fake2"])
-        self.assertIn("budget", room)
+        for key in ("contacts", "categories", "conversations", "providers", "theme", "price_table"):
+            self.assertIn(key, info)
+        self.assertGreaterEqual(len(info["contacts"]), 8)
+        self.assertIn("常用", info["categories"])
 
-    def test_create_room(self):
-        status, _, raw = self.request("POST", "/api/rooms", {"name": "测试房间", "members": ["ollama"]})
+    def test_onboarding_when_no_key(self):
+        status, info = self.live.req("GET", "/api/info")
+        self.assertTrue(info["onboarding"], "没有 key 时应该进引导模式")
+
+    def test_default_contacts_have_ids(self):
+        status, info = self.live.req("GET", "/api/info")
+        ids = [c["id"] for c in info["contacts"]]
+        for expected in ("claude", "gpt", "gemini", "grok", "deepseek"):
+            self.assertIn(expected, ids)
+
+    def test_add_contact(self):
+        status, c = self.live.req(
+            "POST", "/api/contacts",
+            {"name": "测试机器人", "provider": "openrouter", "model": "a/b", "category": "测试"},
+        )
+        self.assertEqual(status, 201, msg=str(c))
+        self.assertEqual(c["name"], "测试机器人")
+        status, info = self.live.req("GET", "/api/info")
+        self.assertIn(c["id"], [x["id"] for x in info["contacts"]])
+        self.assertIn("测试", info["categories"])
+
+    def test_add_contact_needs_name(self):
+        status, err = self.live.req("POST", "/api/contacts", {"provider": "openrouter"})
+        self.assertEqual(status, 400)
+
+    def test_update_contact(self):
+        status, c = self.live.req(
+            "POST", "/api/contacts", {"name": "改我", "provider": "openrouter", "model": "a/b"}
+        )
+        status, got = self.live.req("PATCH", f"/api/contacts/{c['id']}", {"name": "改好了"})
+        self.assertEqual(status, 200)
+        self.assertEqual(got["name"], "改好了")
+
+    def test_delete_contact(self):
+        status, c = self.live.req(
+            "POST", "/api/contacts", {"name": "删我", "provider": "openrouter", "model": "a/b"}
+        )
+        status, ok = self.live.req("DELETE", f"/api/contacts/{c['id']}")
+        self.assertEqual(status, 200)
+        self.assertTrue(ok["ok"])
+        status, info = self.live.req("GET", "/api/info")
+        self.assertNotIn(c["id"], [x["id"] for x in info["contacts"]])
+
+
+class TestConversations(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.live = Live()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.live.stop()
+
+    def test_create_group(self):
+        status, c = self.live.req(
+            "POST", "/api/conversations", {"title": "群聊", "members": ["claude", "gpt"]}
+        )
+        self.assertEqual(status, 201, msg=str(c))
+        self.assertEqual(c["kind"], "group")
+        self.assertEqual(c["members"], ["claude", "gpt"])
+
+    def test_create_dm_auto_title(self):
+        status, c = self.live.req("POST", "/api/conversations", {"members": ["gemini"]})
         self.assertEqual(status, 201)
-        room = json.loads(raw)
-        self.assertEqual(room["name"], "测试房间")
-        self.assertEqual(room["members"], ["ollama"])
+        self.assertEqual(c["kind"], "dm")
+        self.assertEqual(c["title"], "Gemini", "单聊没给名字时应该用成员名")
 
-        # 新房间应该出现在列表里
-        _, data = self.get_json("/api/rooms")
-        self.assertIn(room["id"], [r["id"] for r in data["rooms"]])
-
-        # 清理
-        self.request("DELETE", f"/api/rooms/{room['id']}")
-
-    def test_create_room_without_members_rejected(self):
-        status, _, raw = self.request("POST", "/api/rooms", {"name": "空", "members": []})
+    def test_create_needs_member(self):
+        status, err = self.live.req("POST", "/api/conversations", {"members": []})
+        self.assertEqual(status, 400)
+        status, err = self.live.req("POST", "/api/conversations", {"members": ["不存在的人"]})
         self.assertEqual(status, 400)
 
-    def test_create_room_with_unusable_member_rejected(self):
-        """认不出的成员名要报错，不能悄悄建一个空房间。"""
-        status, _, _ = self.request("POST", "/api/rooms", {"members": ["不存在的模型"]})
+    def test_get_and_rename(self):
+        status, c = self.live.req("POST", "/api/conversations", {"title": "旧名", "members": ["claude"]})
+        status, got = self.live.req("GET", f"/api/conversations/{c['id']}")
+        self.assertEqual(got["title"], "旧名")
+        status, renamed = self.live.req("PATCH", f"/api/conversations/{c['id']}", {"title": "新名"})
+        self.assertEqual(status, 200)
+        self.assertEqual(renamed["title"], "新名")
+        status, again = self.live.req("GET", f"/api/conversations/{c['id']}")
+        self.assertEqual(again["title"], "新名")
+
+    def test_rename_category(self):
+        status, c = self.live.req("POST", "/api/conversations", {"title": "x", "members": ["claude"]})
+        status, got = self.live.req(
+            "PATCH", f"/api/conversations/{c['id']}", {"title": "x", "category": "工作"}
+        )
+        self.assertEqual(got["category"], "工作")
+
+    def test_delete(self):
+        status, c = self.live.req("POST", "/api/conversations", {"title": "删", "members": ["claude"]})
+        status, ok = self.live.req("DELETE", f"/api/conversations/{c['id']}")
+        self.assertTrue(ok["ok"])
+        status, _ = self.live.req("GET", f"/api/conversations/{c['id']}")
+        self.assertEqual(status, 404)
+
+    def test_missing_returns_404(self):
+        for method, path in [
+            ("GET", "/api/conversations/nope"),
+            ("PATCH", "/api/conversations/nope"),
+            ("DELETE", "/api/conversations/nope"),
+        ]:
+            status, _ = self.live.req(method, path, {"title": "x"} if method == "PATCH" else None)
+            self.assertEqual(status, 404, f"{method} {path}")
+
+    def test_path_traversal_blocked(self):
+        status, _ = self.live.req("GET", "/api/conversations/..%2F..%2Fetc%2Fpasswd")
+        self.assertIn(status, (400, 404))
+
+    def test_export(self):
+        status, c = self.live.req("POST", "/api/conversations", {"title": "导出我", "members": ["claude"]})
+        conv = store.load_conversation(c["id"])
+        conv["turns"] = [{"speaker": "Claude", "role": "assistant", "content": "要被导出的话"}]
+        store.save_conversation(conv)
+        status, md = self.live.req("GET", f"/api/conversations/{c['id']}/export")
+        self.assertEqual(status, 200)
+        self.assertIn("导出我", md)
+        self.assertIn("要被导出的话", md)
+
+
+class TestAvatars(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.live = Live()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.live.stop()
+
+    def test_builtin_svg(self):
+        for key in ("openai", "claude", "gemini", "grok", "deepseek", "qwen", "kimi", "glm"):
+            status, body = self.live.req("GET", f"/api/avatar/{key}")
+            self.assertEqual(status, 200, key)
+            self.assertIn("<svg", body, key)
+            self.assertIn("viewBox", body, key)
+
+    def test_unknown_gets_generic(self):
+        status, body = self.live.req("GET", "/api/avatar/完全不存在")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, avatars.AVATARS["generic"])
+
+    def test_contact_id_avatar(self):
+        status, body = self.live.req("GET", "/api/avatar/claude")
+        self.assertIn("<svg", body)
+
+    def test_upload_overrides(self):
+        uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+        status, ok = self.live.req("POST", "/api/avatar/kimi", {"data": uri})
+        self.assertEqual(status, 200, msg=str(ok))
+        status, body = self.live.req("GET", "/api/avatar/kimi")
+        self.assertEqual(status, 200)
+        # 上传后返回的是二进制图片，不再是 SVG
+        self.assertNotIn("<svg", body if isinstance(body, str) else "")
+
+    def test_upload_rejects_url(self):
+        status, err = self.live.req("POST", "/api/avatar/grok", {"data": "https://evil/x.png"})
         self.assertEqual(status, 400)
 
-    def test_unknown_room_404(self):
-        status, _ = self.get_json("/api/rooms/deadbeef")
-        self.assertEqual(status, 404)
 
-    def test_delete_room(self):
-        _, _, raw = self.request("POST", "/api/rooms", {"name": "删我", "members": ["ollama"]})
-        room_id = json.loads(raw)["id"]
-        status, _, _ = self.request("DELETE", f"/api/rooms/{room_id}")
+class TestSearch(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.live = Live()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.live.stop()
+
+    def test_empty_query(self):
+        status, d = self.live.req("GET", "/api/search?q=")
         self.assertEqual(status, 200)
-        status, _ = self.get_json(f"/api/rooms/{room_id}")
-        self.assertEqual(status, 404)
+        self.assertEqual(d["hits"], [])
 
-    def test_delete_unknown_room_404(self):
-        status, _, _ = self.request("DELETE", "/api/rooms/nope")
-        self.assertEqual(status, 404)
+    def test_finds_history(self):
+        status, c = self.live.req("POST", "/api/conversations", {"title": "搜我", "members": ["claude"]})
+        conv = store.load_conversation(c["id"])
+        conv["turns"] = [{"speaker": "Claude", "role": "assistant", "content": "这里讨论了连接池泄漏"}]
+        store.save_conversation(conv)
 
-
-class TestSay(WebCase):
-    def test_without_mention_asks_everyone(self):
-        status, ctype, events = self.say(self.default_room(), "这个方案怎么样")
+        status, d = self.live.req("GET", "/api/search?q=连接池泄漏")
         self.assertEqual(status, 200)
-        self.assertIn("event-stream", ctype)
+        self.assertEqual(len(d["hits"]), 1)
+        self.assertEqual(d["hits"][0]["conversation"], c["id"])
 
-        turns = [e for e in events if e["type"] == "turn"]
-        self.assertEqual(len(turns), 2)
-        self.assertEqual({t["speaker"] for t in turns}, {"fake1", "fake2"})
+    def test_no_match(self):
+        status, d = self.live.req("GET", "/api/search?q=绝对不存在的词xyz")
+        self.assertEqual(d["hits"], [])
 
-    def test_with_mention_asks_only_one(self):
-        _, _, events = self.say(self.default_room(), "@fake1 只问你")
-        turns = [e for e in events if e["type"] == "turn"]
-        self.assertEqual(len(turns), 1)
-        self.assertEqual(turns[0]["speaker"], "fake1")
 
-    def test_done_event_has_stats(self):
-        _, _, events = self.say(self.default_room(), "算一下花费")
-        done = [e for e in events if e["type"] == "done"]
-        self.assertEqual(len(done), 1)
-        self.assertGreater(done[0]["tokens"], 0)
-        self.assertIn("stats", done[0])
-        self.assertIsInstance(done[0]["stats"], list)
+class TestSettings(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.live = Live()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.live.stop()
+
+    def test_theme_persists(self):
+        status, d = self.live.req("POST", "/api/settings", {"theme": "light"})
+        self.assertEqual(status, 200)
+        self.assertEqual(d["info"]["theme"], "light")
+        status, info = self.live.req("GET", "/api/info")
+        self.assertEqual(info["theme"], "light")
+
+    def test_theme_rejects_garbage(self):
+        self.live.req("POST", "/api/settings", {"theme": "rainbow"})
+        status, info = self.live.req("GET", "/api/info")
+        self.assertIn(info["theme"], ("dark", "light"))
+
+    def test_context_and_budget(self):
+        status, d = self.live.req(
+            "POST",
+            "/api/settings",
+            {"context": {"keep_recent": 4, "budget_tokens": 2000, "enabled": True},
+             "budget": {"max_rounds": 3, "max_cost_usd": 0.2}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(d["info"]["context"]["keep_recent"], 4)
+        self.assertEqual(d["info"]["budget"]["max_rounds"], 3)
+
+
+class TestSay(unittest.TestCase):
+    """真的走一遍 SSE：假上游 → 工作台 → 落盘。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.live = Live()
+        cls.up = FakeUpstream("这是我真实返回的一句话。")
+        status, c = cls.live.req(
+            "POST", "/api/contacts",
+            {"name": "Fake", "provider": "testbot", "model": "fake-1", "base_url": cls.up.base_url},
+        )
+        cls.contact = c
+        status, conv = cls.live.req("POST", "/api/conversations", {"title": "SSE", "members": [c["id"]]})
+        cls.conv = conv
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.up.stop()
+        cls.live.stop()
+
+    def _say(self, text):
+        conn = http.client.HTTPConnection(self.live.host, timeout=60)
+        conn.request(
+            "POST",
+            f"/api/conversations/{self.conv['id']}/say",
+            body=json.dumps({"text": text}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        r = conn.getresponse()
+        events = []
+        for line in r:
+            line = line.decode("utf-8").strip()
+            if line.startswith("data: "):
+                events.append(json.loads(line[6:]))
+        conn.close()
+        return events
+
+    def test_stream_returns_turn_and_done(self):
+        events = self._say("你好")
+        kinds = [e["type"] for e in events]
+        self.assertIn("turn", kinds)
+        self.assertIn("done", kinds)
+        turn = next(e for e in events if e["type"] == "turn")
+        self.assertEqual(turn["content"], "这是我真实返回的一句话。")
+        self.assertGreater(turn["tokens"], 0)
+
+    def test_persisted_to_disk(self):
+        self._say("落盘测试")
+        conv = store.load_conversation(self.conv["id"])
+        texts = [t.get("content") for t in conv["turns"]]
+        self.assertIn("落盘测试", texts, "用户发言要落盘")
+        self.assertIn("这是我真实返回的一句话。", texts, "模型回答要落盘")
+
+    def test_reload_keeps_history(self):
+        """再读一次会话，历史还在（模拟关掉再打开）。"""
+        self._say("还记得吗")
+        status, d = self.live.req("GET", f"/api/conversations/{self.conv['id']}")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(d["turns"]), 2)
 
     def test_empty_text_rejected(self):
-        status, _, _ = self.request("POST", f"/api/rooms/{self.default_room()}/say", {"text": "   "})
-        self.assertEqual(status, 400)
-
-    def test_bad_json_rejected(self):
-        conn = http.client.HTTPConnection(self.host, timeout=10)
+        conn = http.client.HTTPConnection(self.live.host, timeout=30)
         conn.request(
-            "POST", f"/api/rooms/{self.default_room()}/say",
-            body=b"not json", headers={"Content-Type": "application/json"},
+            "POST",
+            f"/api/conversations/{self.conv['id']}/say",
+            body=json.dumps({"text": "   "}).encode(),
+            headers={"Content-Type": "application/json"},
         )
-        resp = conn.getresponse()
-        resp.read()
+        r = conn.getresponse()
+        self.assertEqual(r.status, 400)
         conn.close()
-        self.assertEqual(resp.status, 400)
 
-    def test_unknown_room_404(self):
-        status, _, _ = self.request("POST", "/api/rooms/nope/say", {"text": "hi"})
-        self.assertEqual(status, 404)
+    def test_unknown_conversation(self):
+        conn = http.client.HTTPConnection(self.live.host, timeout=30)
+        conn.request(
+            "POST",
+            "/api/conversations/nope/say",
+            body=json.dumps({"text": "hi"}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(conn.getresponse().status, 404)
+        conn.close()
+
+    def test_mention_routing(self):
+        """@名字 时只有被点名的人回答。"""
+        before = len(self.up.requests)
+        self._say("@Fake 你怎么看")
+        self.assertGreater(len(self.up.requests), before)
 
 
-class TestTranscript(WebCase):
-    def test_turns_persisted(self):
-        room_id = self.default_room()
-        self.say(room_id, "记下来")
-        status, data = self.get_json(f"/api/rooms/{room_id}")
-        self.assertEqual(status, 200)
-        self.assertGreaterEqual(len(data["turns"]), 3)  # 1 user + 2 models
-        self.assertEqual(data["turns"][0]["role"], "user")
+class TestWithKey(unittest.TestCase):
+    """有 key 时应该自动建一个默认群聊，用户打开就能说话。"""
 
-    def test_stats_breakdown(self):
-        room_id = self.default_room()
-        self.say(room_id, "统计一下")
-        status, data = self.get_json(f"/api/rooms/{room_id}/stats")
-        self.assertEqual(status, 200)
-        speakers = {r["speaker"] for r in data["by_model"]}
-        self.assertEqual(speakers, {"fake1", "fake2"})
-        self.assertGreater(data["total_tokens"], 0)
+    @classmethod
+    def setUpClass(cls):
+        cls.live = Live(with_key=True)
 
-    def test_export_markdown(self):
-        room_id = self.default_room()
-        self.say(room_id, "导出测试")
-        status, ctype, raw = self.request("GET", f"/api/rooms/{room_id}/export")
-        self.assertEqual(status, 200)
-        self.assertIn("markdown", ctype)
-        text = raw.decode("utf-8")
-        self.assertIn("# ", text)  # 标题
-        self.assertIn("[user]", text)
-        self.assertIn("估算成本", text)
+    @classmethod
+    def tearDownClass(cls):
+        cls.live.stop()
 
-    def test_export_unknown_room_404(self):
-        status, _, _ = self.request("GET", "/api/rooms/nope/export")
-        self.assertEqual(status, 404)
+    def test_default_conversation_created(self):
+        status, info = self.live.req("GET", "/api/info")
+        self.assertFalse(info["onboarding"])
+        self.assertEqual(len(info["conversations"]), 1)
+        conv = info["conversations"][0]
+        self.assertEqual(conv["kind"], "group")
+        self.assertEqual(len(conv["members"]), 3)
+
+    def test_setup_endpoint(self):
+        status, d = self.live.req(
+            "POST", "/api/setup", {"provider": "openrouter", "api_key": "sk-or-v1-abc"}
+        )
+        self.assertEqual(status, 201, msg=str(d))
+        self.assertFalse(d["info"]["onboarding"])
+        self.assertEqual(config.load()["api_keys"]["openrouter"], "sk-or-v1-abc")
 
 
 class TestWindowsEncoding(unittest.TestCase):
-    """Windows 下 stdout 可能是 cp1252，打印中文会抛 UnicodeEncodeError。
-
-    这个 bug 曾让 CI 的 Windows job 全红：服务线程在打印启动信息时死掉，
-    之后所有连接都被拒。它也会打到真实用户 —— 任何把输出重定向的场景。
-    """
-
-    def test_out_survives_cp1252_stdout(self):
-        import io
-        import sys as _sys
-        from unittest import mock
-
-        from polylogue.web import _out
-
-        buf = io.BytesIO()
-        stream = io.TextIOWrapper(buf, encoding="cp1252")
-        with mock.patch.object(_sys, "stdout", stream):
-            _out("polylogue 工作台 → http://127.0.0.1:8765")  # 不能抛
-
-    def test_ensure_utf8_streams_reconfigures(self):
-        import io
-        import sys as _sys
-        from unittest import mock
-
-        from polylogue.web import ensure_utf8_streams
-
-        stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
-        with mock.patch.object(_sys, "stdout", stream):
-            ensure_utf8_streams()
-            self.assertEqual(stream.encoding.lower().replace("-", ""), "utf8")
-            print("工作台")  # 现在不该抛了
+    """Windows 上 stdout 可能是 cp1252，打印中文不能把服务打死。"""
 
     def test_server_survives_cp1252_stdout(self):
-        """真的起一个子进程，stdout 设成 cp1252，确认服务不会在启动时死掉。"""
-        import socket
-        import subprocess
-        import sys as _sys
-        import time
-        import urllib.request
-        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+            sock.close()
 
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
+            env = dict(os.environ)
+            env["PYTHONIOENCODING"] = "cp1252"
+            env["USERPROFILE"] = tmp
+            env["HOME"] = tmp
+            env["PYTHONPATH"] = str(ROOT)
+            env.pop("OPENROUTER_API_KEY", None)
 
-        env = dict(**__import__("os").environ)
-        env["PYTHONIOENCODING"] = "cp1252"
-        root = Path(__file__).resolve().parent.parent
-
-        proc = subprocess.Popen(
-            [_sys.executable, "-m", "polylogue", "--web", "--models", "ollama", "--port", str(port)],
-            cwd=str(root),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
-        try:
-            ok = False
-            for _ in range(40):
-                if proc.poll() is not None:
-                    break  # 进程已经死了，别等了
-                try:
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/info", timeout=1) as r:
-                        if r.status == 200:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "polylogue", "--web", "--port", str(port)],
+                cwd=str(ROOT), env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            try:
+                ok = False
+                deadline = time.time() + 25
+                while time.time() < deadline:
+                    try:
+                        conn = http.client.HTTPConnection(f"127.0.0.1:{port}", timeout=2)
+                        conn.request("GET", "/api/info")
+                        if conn.getresponse().status == 200:
                             ok = True
+                            conn.close()
                             break
-                except Exception:
-                    time.sleep(0.25)
-
-            self.assertIsNone(proc.poll(), msg="进程在启动阶段就退出了")
-            self.assertTrue(ok, msg="cp1252 的 stdout 下服务没能响应")
-        finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-
-
-class TestCliWebWiring(unittest.TestCase):
-    """`--web` 必须把 `--provider` 和 `--model` 传下去。
-
-    曾经漏传：Web 模式下自定义端点被静默忽略，进程直接以
-    「不认识的 provider」退出，而报错信息还在提示用户用 --provider 自定义。
-    """
-
-    def test_provider_flag_reaches_web_mode(self):
-        upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeUpstream)
-        threading.Thread(target=upstream.serve_forever, daemon=True).start()
-        up_url = f"http://127.0.0.1:{upstream.server_address[1]}/v1"
-
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-
-        env = dict(os.environ)
-        env["PYTHONIOENCODING"] = "utf-8"
-        root = Path(__file__).resolve().parent.parent
-
-        proc = subprocess.Popen(
-            [
-                sys.executable, "-m", "polylogue", "--web",
-                "--models", "mybot",
-                "--provider", f"mybot={up_url}",
-                "--model", "mybot=some-model",
-                "--port", str(port),
-            ],
-            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
-        )
-        try:
-            info = None
-            for _ in range(60):
-                if proc.poll() is not None:
-                    break
+                        conn.close()
+                    except OSError:
+                        time.sleep(0.3)
+                self.assertTrue(ok, "cp1252 stdout 下服务没起来（打印中文把它打死了）")
+            finally:
+                proc.terminate()
                 try:
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/info", timeout=1) as r:
-                        info = json.loads(r.read())
-                    break
-                except Exception:
-                    time.sleep(0.2)
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
-            if proc.poll() is not None:
-                out = proc.stdout.read().decode("utf-8", "replace") if proc.stdout else ""
-                self.fail(f"--web 没起来，进程退出了。输出：{out[:500]}")
 
-            self.assertIsNotNone(info, msg="--web 起来了但 /api/info 取不到")
-            members = info["rooms"][0]["members"]
-            self.assertEqual(members, ["mybot"], msg="--provider 定义的成员没进房间")
-        finally:
-            proc.terminate()
+class TestCliWiring(unittest.TestCase):
+    def test_web_flag_starts_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+            sock.close()
+
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(ROOT)
+            env["USERPROFILE"] = tmp
+            env["HOME"] = tmp
+            env["PYTHONIOENCODING"] = "utf-8"
+            env.pop("OPENROUTER_API_KEY", None)
+
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "polylogue", "--web", "--port", str(port)],
+                cwd=str(ROOT), env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            upstream.shutdown()
+                info = None
+                deadline = time.time() + 25
+                while time.time() < deadline:
+                    try:
+                        conn = http.client.HTTPConnection(f"127.0.0.1:{port}", timeout=2)
+                        conn.request("GET", "/api/info")
+                        r = conn.getresponse()
+                        if r.status == 200:
+                            info = json.loads(r.read())
+                            conn.close()
+                            break
+                        conn.close()
+                    except OSError:
+                        time.sleep(0.3)
+                self.assertIsNotNone(info, "CLI 没把服务起起来")
+                self.assertIn("contacts", info)
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
 
 if __name__ == "__main__":

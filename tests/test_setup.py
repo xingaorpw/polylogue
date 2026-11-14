@@ -2,11 +2,12 @@
 
 验证两件事：
 1. 本机什么 key 都没有时，服务照常起来并进入引导模式（不是启动失败）
-2. 在界面上填一次 key，就能建出房间开始用 —— 不用改环境变量、不用重启
+2. 在界面上填一次 key，就能建出会话开始用 —— 不用改环境变量、不用重启
 """
 
 import http.client
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -143,7 +144,18 @@ class TestSetupEndpoint(Isolated):
         for p in cls._patches:
             p.start()
 
-        cls._env = mock.patch.dict("os.environ", {}, clear=True)
+        # 只摘掉 API key，不要清空整个环境：Windows 的 winsock/OpenSSL
+        # 初始化依赖 SYSTEMROOT，清空后 socket 都建不起来。
+        _drop = {
+            "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY",
+            "GROQ_API_KEY", "MISTRAL_API_KEY", "TOGETHER_API_KEY", "LLM_API_KEY",
+        }
+        cls._env = mock.patch.dict(
+            "os.environ",
+            {k: v for k, v in os.environ.items() if k not in _drop},
+            clear=True,
+        )
         cls._env.start()
 
         ready = threading.Event()
@@ -179,18 +191,21 @@ class TestSetupEndpoint(Isolated):
         status, info = self.req("GET", "/api/info")
         self.assertEqual(status, 200)
         self.assertTrue(info["onboarding"])
-        self.assertEqual(info["rooms"], [])
+        self.assertEqual(info["conversations"], [])
         self.assertIn("presets", info)
+        self.assertTrue(info["contacts"], "引导模式也要先有通讯录可选")
 
-    def test_02_setup_creates_room(self):
+    def test_02_setup_creates_conversation(self):
         status, data = self.req(
             "POST",
             "/api/setup",
             {"provider": "openrouter", "api_key": "sk-or-v1-test", "preset": "省钱"},
         )
         self.assertEqual(status, 201, msg=str(data))
-        self.assertTrue(data["room"]["members"])
         self.assertFalse(data["info"]["onboarding"])
+        convs = data["info"]["conversations"]
+        self.assertTrue(convs, "填完 key 应该自动建一个能直接说话的会话")
+        self.assertTrue(convs[0]["members"])
         # key 落盘了
         self.assertEqual(config.load()["api_keys"]["openrouter"], "sk-or-v1-test")
         self.assertTrue(config.load()["onboarded"])

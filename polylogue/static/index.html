@@ -1,275 +1,438 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>polylogue</title>
 <style>
-  :root{
-    --bg:#0b0d12; --panel:#12151d; --panel2:#181c26; --line:#232936;
-    --text:#e8eaf0; --muted:#7d8798; --dim:#5a6373;
-    --accent:#7aa2ff; --accent2:#9d7aff; --ok:#4ade80; --warn:#fbbf24; --danger:#f87171;
-    --radius:10px;
+  :root[data-theme="dark"]{
+    --bg:#0a0a0c; --panel:#111114; --panel2:#17171b; --panel3:#1e1e24;
+    --line:#26262d; --line2:#33333c;
+    --text:#f3f3f6; --muted:#8e8e9a; --dim:#5b5b66;
+    --accent:#5b8cff; --accent-soft:rgba(91,140,255,.14);
+    --ok:#3ddc84; --warn:#ffb020; --danger:#ff5f5f;
+    --bubble:#1b1b21; --bubble-me:#2b3f7a;
+    --shadow:0 8px 30px rgba(0,0,0,.45);
+  }
+  :root[data-theme="light"]{
+    --bg:#ffffff; --panel:#f6f6f8; --panel2:#efeff2; --panel3:#e8e8ec;
+    --line:#e4e4e9; --line2:#d4d4db;
+    --text:#141418; --muted:#66666f; --dim:#9b9ba5;
+    --accent:#2f5fe0; --accent-soft:rgba(47,95,224,.10);
+    --ok:#0f9d58; --warn:#c77700; --danger:#d93025;
+    --bubble:#f2f2f5; --bubble-me:#2f5fe0;
+    --shadow:0 8px 30px rgba(20,20,30,.10);
   }
   *{box-sizing:border-box}
   html,body{height:100%;margin:0}
   body{
-    background:var(--bg); color:var(--text);
-    font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
-    display:grid; grid-template-columns:212px 1fr 268px; grid-template-rows:50px 1fr;
-    grid-template-areas:"head head head" "side main insp";
-    overflow:hidden; -webkit-font-smoothing:antialiased;
+    background:var(--bg); color:var(--text); overflow:hidden;
+    font:14px/1.62 -apple-system,"Segoe UI Variable","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:grid; grid-template-columns:264px 1fr; grid-template-rows:54px 1fr;
+    grid-template-areas:"head head" "rail main";
   }
-  button{font:inherit;cursor:pointer;border:0;border-radius:8px;padding:8px 14px;
-    background:var(--accent);color:#08101f;font-weight:600;transition:filter .15s}
-  button:hover:not(:disabled){filter:brightness(1.1)}
-  button:disabled{opacity:.4;cursor:not-allowed}
-  button.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
-  button.ghost:hover:not(:disabled){color:var(--text);border-color:var(--accent)}
-  button.danger{background:var(--danger);color:#2a0a0a}
-  input,textarea,select{font:inherit;background:var(--bg);color:var(--text);
-    border:1px solid var(--line);border-radius:8px;padding:9px 11px;outline:none;width:100%}
-  input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+  button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
+  .btn{background:var(--accent);color:#fff;border-radius:9px;padding:8px 15px;font-weight:600;
+    transition:filter .14s,transform .06s}
+  .btn:hover{filter:brightness(1.08)}
+  .btn:active{transform:translateY(1px)}
+  .btn:disabled{opacity:.42;cursor:not-allowed;filter:none}
+  .btn.ghost{background:var(--panel2);color:var(--muted)}
+  .btn.ghost:hover{color:var(--text)}
+  .btn.danger{background:var(--danger);color:#fff}
+  .ico{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;
+    color:var(--muted);transition:.14s;font-size:15px}
+  .ico:hover{background:var(--panel2);color:var(--text)}
+  input,textarea,select{font:inherit;background:var(--panel2);color:var(--text);
+    border:1px solid transparent;border-radius:9px;padding:9px 12px;outline:none;width:100%}
+  input:focus,textarea:focus,select:focus{border-color:var(--accent);background:var(--bg)}
+  ::placeholder{color:var(--dim)}
 
-  /* ── header ── */
-  header{grid-area:head;display:flex;align-items:center;gap:12px;padding:0 16px;
+  /* ───────── header ───────── */
+  header{grid-area:head;display:flex;align-items:center;gap:10px;padding:0 16px;
     border-bottom:1px solid var(--line);background:var(--panel)}
-  .brand{font-weight:700;letter-spacing:.3px;font-size:15px}
-  .brand i{color:var(--accent);font-style:normal}
-  .roomtitle{color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .spacer{flex:1}
-  .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:750;font-size:15px;letter-spacing:.2px}
+  .brand .dot{width:9px;height:9px;border-radius:3px;
+    background:linear-gradient(135deg,var(--accent),#a855f7)}
+  .brand span{color:var(--accent)}
+  .searchwrap{flex:1;max-width:460px;position:relative;margin-left:18px}
+  .searchwrap input{padding-left:34px;height:34px;border-radius:10px}
+  .searchwrap .mag{position:absolute;left:11px;top:8px;color:var(--dim);font-size:13px}
+  .grow{flex:1}
+  .pill{font-size:11px;padding:3px 9px;border-radius:99px;background:var(--panel2);
+    color:var(--muted);white-space:nowrap}
 
-  /* ── 左栏 ── */
-  aside{grid-area:side;background:var(--panel);border-right:1px solid var(--line);
+  /* ───────── 左栏 ───────── */
+  .rail{grid-area:rail;background:var(--panel);border-right:1px solid var(--line);
     display:flex;flex-direction:column;min-height:0}
-  .sidehead{padding:14px 14px 8px;font-size:11px;letter-spacing:.9px;text-transform:uppercase;
-    color:var(--dim);display:flex;align-items:center;justify-content:space-between}
-  #rooms{flex:1;overflow-y:auto;padding:0 8px 8px}
-  .room{padding:9px 10px;border-radius:8px;cursor:pointer;margin-bottom:3px;
-    border:1px solid transparent;display:flex;align-items:center;gap:8px}
-  .room:hover{background:var(--panel2)}
-  .room.active{background:var(--panel2);border-color:var(--accent)}
-  .room .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
-  .room .n{font-size:11px;color:var(--dim)}
-  .room .x{opacity:0;color:var(--dim);font-size:15px;padding:0 2px}
-  .room:hover .x{opacity:1}
-  .room .x:hover{color:var(--danger)}
-  .sidefoot{padding:10px;border-top:1px solid var(--line);display:flex;gap:6px}
-  .sidefoot button{flex:1;font-size:12px;padding:7px 8px}
+  .tabs{display:flex;gap:4px;padding:10px 12px 4px}
+  .tab{flex:1;text-align:center;padding:7px 0;border-radius:9px;font-size:13px;
+    color:var(--muted);font-weight:600;transition:.14s}
+  .tab.on{background:var(--accent-soft);color:var(--accent)}
+  .tab:hover:not(.on){background:var(--panel2);color:var(--text)}
+  .railacts{display:flex;gap:6px;padding:6px 12px 8px}
+  .railacts .btn{flex:1;font-size:12px;padding:7px 0}
+  .scroll{flex:1;overflow-y:auto;padding:2px 8px 14px;min-height:0}
+  .scroll::-webkit-scrollbar{width:8px}
+  .scroll::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
+  .grp{margin-top:10px}
+  .grph{display:flex;align-items:center;gap:6px;padding:5px 8px;font-size:11px;
+    letter-spacing:.7px;text-transform:uppercase;color:var(--dim);font-weight:650;cursor:pointer;
+    border-radius:7px}
+  .grph:hover{background:var(--panel2)}
+  .grph .cv{font-size:9px;transition:transform .16s;display:inline-block}
+  .grph.closed .cv{transform:rotate(-90deg)}
+  .grph .n{margin-left:auto;font-weight:500;letter-spacing:0}
+  .item{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:10px;
+    cursor:pointer;position:relative;transition:background .12s}
+  .item:hover{background:var(--panel2)}
+  .item.on{background:var(--accent-soft)}
+  .item.on .nm{color:var(--accent)}
+  .av{width:32px;height:32px;border-radius:9px;flex:none;object-fit:cover;
+    background:var(--panel3);display:grid;place-items:center;font-size:13px;font-weight:700;
+    color:var(--muted);overflow:hidden}
+  .av img{width:100%;height:100%;object-fit:cover;display:block}
+  .av.stack{position:relative}
+  .av.stack img{position:absolute;width:60%;height:60%;border-radius:6px;
+    border:1.5px solid var(--panel)}
+  .av.stack img:nth-child(1){left:0;top:0}
+  .av.stack img:nth-child(2){right:0;top:0}
+  .av.stack img:nth-child(3){left:20%;bottom:0}
+  .meta{min-width:0;flex:1}
+  .nm{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis;display:flex;align-items:center;gap:5px}
+  .sub{font-size:11.5px;color:var(--dim);white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis;margin-top:1px}
+  .acts2{display:none;gap:2px}
+  .item:hover .acts2{display:flex}
+  .acts2 button{width:22px;height:22px;border-radius:6px;color:var(--dim);font-size:12px}
+  .acts2 button:hover{background:var(--panel3);color:var(--text)}
+  .badge{font-size:9.5px;padding:1px 5px;border-radius:5px;background:var(--panel3);
+    color:var(--dim);font-weight:600;flex:none}
+  .railempty{padding:22px 14px;color:var(--dim);font-size:12.5px;text-align:center;line-height:1.9}
 
-  /* ── 中栏 ── */
-  main{grid-area:main;display:flex;flex-direction:column;min-height:0;min-width:0}
-  #log{flex:1;overflow-y:auto;padding:20px 26px;display:flex;flex-direction:column;gap:16px}
-  .msg{display:flex;gap:10px;animation:in .18s ease-out}
-  @keyframes in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-  .av{width:26px;height:26px;border-radius:7px;flex:none;display:grid;place-items:center;
-    font-size:11px;font-weight:700;color:#0b0d12}
-  .body{min-width:0;flex:1}
-  .who{font-size:12px;font-weight:700;margin-bottom:2px}
-  .txt{white-space:pre-wrap;word-break:break-word}
-  .msg.user .txt{color:#c8cede}
-  .msg.err .txt{color:var(--danger)}
-  .msg.note{justify-content:center}
-  .msg.note .txt{font-size:12px;color:var(--dim);text-align:center}
-  .mention{color:var(--accent);font-weight:600}
-  .empty{color:var(--dim);text-align:center;margin:auto;line-height:2.1;font-size:13px}
-  .empty kbd{background:var(--panel2);border:1px solid var(--line);border-radius:5px;
-    padding:1px 6px;font-family:inherit;color:var(--accent)}
+  /* ───────── 主区 ───────── */
+  .main{grid-area:main;display:flex;flex-direction:column;min-height:0;min-width:0;position:relative}
+  .mhead{display:flex;align-items:center;gap:10px;padding:11px 20px;
+    border-bottom:1px solid var(--line);min-height:56px}
+  .mhead .ttl{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis;cursor:text;border-radius:6px;padding:2px 6px;margin-left:-6px}
+  .mhead .ttl:hover{background:var(--panel2)}
+  .mhead input.rename{max-width:280px;font-size:15px;font-weight:700;height:30px;padding:2px 8px}
+  .mhead .mem{display:flex;gap:-6px;margin-left:2px}
+  .mhead .mem img{width:24px;height:24px;border-radius:7px;border:2px solid var(--bg);
+    margin-left:-6px;background:var(--panel3)}
+  .mhead .mem img:first-child{margin-left:0}
+  .mhead .sp{flex:1}
+  .mhead .cost{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 
-  .composer{border-top:1px solid var(--line);background:var(--panel);padding:12px 18px 14px}
-  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px}
-  .chip{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);
-    color:var(--muted);cursor:pointer;user-select:none;transition:.15s}
-  .chip:hover{border-color:var(--accent);color:var(--text)}
+  #log{flex:1;overflow-y:auto;padding:22px 26px 10px;min-height:0}
+  #log::-webkit-scrollbar{width:9px}
+  #log::-webkit-scrollbar-thumb{background:var(--line2);border-radius:5px}
+  .row{display:flex;gap:10px;margin-bottom:18px;animation:pop .2s ease-out}
+  @keyframes pop{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .row.me{flex-direction:row-reverse}
+  .row .av{width:34px;height:34px;border-radius:10px}
+  .bub{max-width:min(680px,78%);background:var(--bubble);border-radius:14px;
+    padding:10px 14px;word-break:break-word;white-space:pre-wrap}
+  .row.me .bub{background:var(--bubble-me);color:#fff}
+  .row.me .bub .mention{color:#cfe0ff}
+  .who{font-size:11.5px;color:var(--muted);font-weight:650;margin-bottom:4px;
+    display:flex;align-items:center;gap:6px}
+  .who .tk{font-weight:400;color:var(--dim);font-size:10.5px}
+  .row.err .bub{background:rgba(255,95,95,.12);color:var(--danger);border:1px solid rgba(255,95,95,.3)}
+  .mention{color:var(--accent);font-weight:650}
+  .note{justify-content:center;margin:6px 0 18px}
+  .note .txt{font-size:12px;color:var(--dim);background:var(--panel2);padding:5px 12px;border-radius:99px}
+  .bigempty{height:100%;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;color:var(--dim);gap:14px;text-align:center;padding:40px}
+  .bigempty .h{font-size:17px;color:var(--muted);font-weight:650}
+  .bigempty kbd{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+    padding:1px 7px;font-family:inherit;color:var(--accent);font-size:12.5px}
+  .bigempty .cards{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:6px}
+  .bigempty .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:14px 18px;cursor:pointer;transition:.15s;min-width:150px}
+  .bigempty .card:hover{border-color:var(--accent);transform:translateY(-1px)}
+  .bigempty .card b{display:block;color:var(--text);font-size:13.5px;margin-bottom:2px}
+  .bigempty .card small{color:var(--dim);font-size:11.5px}
+
+  .composer{border-top:1px solid var(--line);padding:12px 22px 16px;background:var(--bg)}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px;align-items:center}
+  .chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:3px 9px 3px 4px;
+    border-radius:99px;background:var(--panel2);color:var(--muted);cursor:pointer;transition:.14s}
+  .chip:hover{background:var(--accent-soft);color:var(--accent)}
+  .chip img{width:16px;height:16px;border-radius:5px}
   .crow{display:flex;gap:10px;align-items:flex-end}
-  textarea{resize:none;min-height:46px;max-height:180px;padding:12px 13px}
+  textarea{resize:none;min-height:48px;max-height:200px;padding:13px 15px;border-radius:12px}
+  .sendbtn{height:48px;padding:0 20px;border-radius:12px}
 
-  /* ── 右栏 ── */
-  .insp{grid-area:insp;background:var(--panel);border-left:1px solid var(--line);
-    overflow-y:auto;padding:14px;min-height:0}
-  .insp h3{font-size:11px;letter-spacing:.9px;text-transform:uppercase;color:var(--dim);
-    margin:18px 0 9px;font-weight:600}
+  /* ───────── 右栏 ───────── */
+  .insp{width:0;overflow:hidden;border-left:1px solid var(--line);background:var(--panel);
+    transition:width .18s;flex:none}
+  .insp.open{width:250px}
+  .inspin{width:250px;padding:16px;overflow-y:auto;height:100%}
+  .insp h3{font-size:10.5px;letter-spacing:.8px;text-transform:uppercase;color:var(--dim);
+    margin:18px 0 8px;font-weight:650}
   .insp h3:first-child{margin-top:0}
-  .kv{display:flex;justify-content:space-between;padding:3px 0;font-size:13px}
+  .kv{display:flex;justify-content:space-between;font-size:12.5px;padding:2px 0}
   .kv .k{color:var(--muted)}
-  .kv .v{font-variant-numeric:tabular-nums}
-  table{width:100%;border-collapse:collapse;font-size:12px}
-  th{text-align:left;color:var(--dim);font-weight:500;padding:5px 0;border-bottom:1px solid var(--line)}
-  td{padding:6px 0;border-bottom:1px solid #1a1e28}
-  td.n{text-align:right;font-variant-numeric:tabular-nums}
-  .sw{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:6px}
-  .bar{height:6px;border-radius:99px;background:var(--panel2);overflow:hidden;margin:7px 0 6px}
-  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .3s}
-  .hint{font-size:11px;color:var(--dim);line-height:1.75}
-  .hint.warn{color:var(--warn)}
+  .kv .v{font-variant-numeric:tabular-nums;font-weight:600}
+  .bar{height:5px;border-radius:99px;background:var(--panel3);overflow:hidden;margin:8px 0 6px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),#a855f7);
+    transition:width .35s}
+  .hint{font-size:11px;color:var(--dim);line-height:1.7}
+  .memb{display:flex;align-items:center;gap:7px;padding:5px 0;font-size:12.5px}
+  .memb img{width:22px;height:22px;border-radius:6px}
+  .memb .c{margin-left:auto;color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums}
 
-  /* ── 引导 ── */
-  #onb{position:fixed;inset:0;background:var(--bg);z-index:100;display:none;
-    align-items:center;justify-content:center;padding:24px}
-  #onb.open{display:flex}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;
-    width:min(560px,100%);padding:30px;max-height:88vh;overflow-y:auto}
-  .card h1{margin:0 0 6px;font-size:20px}
-  .card .sub{color:var(--muted);font-size:13px;margin-bottom:22px;line-height:1.8}
-  .card label{display:block;font-size:12px;color:var(--muted);margin:16px 0 6px}
-  .found{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
-    padding:13px 15px;margin-bottom:8px;display:flex;align-items:center;gap:11px}
-  .found .ok{color:var(--ok);font-size:16px}
-  .found .txt2{flex:1;font-size:13px}
-  .found .txt2 small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
-  .tiers{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
-  .tier{border:1px solid var(--line);border-radius:10px;padding:11px;cursor:pointer;text-align:center;transition:.15s}
-  .tier:hover{border-color:var(--accent)}
-  .tier.on{border-color:var(--accent);background:var(--panel2)}
-  .tier b{display:block;font-size:13px;margin-bottom:3px}
-  .tier small{color:var(--dim);font-size:11px;line-height:1.5}
-  .card .acts{display:flex;justify-content:flex-end;gap:9px;margin-top:24px}
-  .err{color:var(--danger);font-size:12px;margin-top:10px;min-height:16px}
-
-  /* ── 设置 ── */
-  #set{position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:90;display:none;
-    align-items:center;justify-content:center;padding:24px}
-  #set.open{display:flex}
+  /* ───────── 弹层 ───────── */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(3px);
+    z-index:60;display:none;align-items:center;justify-content:center;padding:24px}
+  .modal.open{display:flex}
+  .sheet{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    width:min(580px,100%);max-height:86vh;overflow-y:auto;box-shadow:var(--shadow)}
+  .sheet .sh{padding:20px 24px 6px}
+  .sheet h2{margin:0 0 4px;font-size:17px}
+  .sheet .desc{color:var(--muted);font-size:12.5px;line-height:1.8}
+  .sheet .sb{padding:10px 24px 4px}
+  .sheet .sf{padding:16px 24px 22px;display:flex;justify-content:flex-end;gap:9px}
+  .lbl{display:block;font-size:11.5px;color:var(--muted);margin:14px 0 6px;font-weight:600}
+  .pick{display:grid;grid-template-columns:1fr 1fr;gap:8px;max-height:290px;overflow-y:auto;padding:2px}
+  .pick .p{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px;
+    border:1.5px solid var(--line);cursor:pointer;transition:.13s}
+  .pick .p:hover{border-color:var(--line2)}
+  .pick .p.on{border-color:var(--accent);background:var(--accent-soft)}
+  .pick .p img{width:28px;height:28px;border-radius:8px}
+  .pick .p .nm{font-size:13px}
+  .pick .p .sub{font-size:10.5px}
+  .err{color:var(--danger);font-size:12px;min-height:16px;margin-top:8px}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  .chk{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:var(--text)}
+  .chk{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;cursor:pointer}
   .chk input{width:auto}
+
+  /* 搜索结果 */
+  .hits{padding:14px 22px;overflow-y:auto;flex:1}
+  .hit{padding:11px 14px;border-radius:11px;cursor:pointer;border:1px solid transparent}
+  .hit:hover{background:var(--panel2);border-color:var(--line)}
+  .hit .t{font-size:13px;font-weight:650;margin-bottom:3px;display:flex;gap:8px;align-items:center}
+  .hit .t .w{font-size:10px;padding:1px 6px;border-radius:5px;background:var(--panel3);
+    color:var(--dim);font-weight:600}
+  .hit .s{font-size:12.5px;color:var(--muted);line-height:1.6}
+  .hit mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding:0 2px}
+  .hithead{padding:4px 22px 10px;font-size:12px;color:var(--dim)}
 </style>
 </head>
 <body>
 <header>
-  <div class="brand">poly<i>logue</i></div>
-  <div class="roomtitle" id="hdrRoom"></div>
-  <div class="spacer"></div>
-  <span class="pill" id="hdrMode"></span>
-  <button class="ghost" id="btnExport">导出</button>
-  <button class="danger" id="btnStop" disabled>停止</button>
+  <div class="brand"><i class="dot"></i>poly<span>logue</span></div>
+  <div class="searchwrap">
+    <span class="mag">⌕</span>
+    <input id="q" placeholder="搜索对话和历史发言…" autocomplete="off">
+  </div>
+  <div class="grow"></div>
+  <span class="pill" id="modePill"></span>
+  <button class="ico" id="btnTheme" title="切换明暗">◐</button>
+  <button class="ico" id="btnInsp" title="成员与花费">☰</button>
+  <button class="ico" id="btnSet" title="设置">⚙</button>
 </header>
 
-<aside>
-  <div class="sidehead"><span>房间</span></div>
-  <div id="rooms"></div>
-  <div class="sidefoot">
-    <button class="ghost" id="btnNewRoom">＋ 房间</button>
-    <button class="ghost" id="btnSettings">设置</button>
+<aside class="rail">
+  <div class="tabs">
+    <div class="tab on" data-tab="chats">会话</div>
+    <div class="tab" data-tab="contacts">通讯录</div>
   </div>
+  <div class="railacts">
+    <button class="btn" id="btnNew">＋ 新对话</button>
+  </div>
+  <div class="scroll" id="list"></div>
 </aside>
 
-<main>
+<main class="main">
+  <div class="mhead">
+    <div class="ttl" id="ttl">选一个对话</div>
+    <div class="mem" id="memAv"></div>
+    <div class="sp"></div>
+    <div class="cost" id="costTop"></div>
+    <button class="ico" id="btnExport" title="导出">⇩</button>
+  </div>
   <div id="log"></div>
   <div class="composer">
     <div class="chips" id="chips"></div>
     <div class="crow">
-      <textarea id="input" placeholder="说点什么。不 @ 任何人 = 同时问所有成员；@名字 = 只说给某个人听。"></textarea>
-      <button id="send">发送</button>
+      <textarea id="input" placeholder="说点什么…  不 @ 任何人 = 全员回答；@名字 = 只说给某个人听"></textarea>
+      <button class="btn sendbtn" id="btnSend">发送</button>
+      <button class="btn danger sendbtn" id="btnStop" style="display:none">停止</button>
+    </div>
+  </div>
+  <div class="insp" id="insp">
+    <div class="inspin">
+      <h3>花费</h3>
+      <div class="kv"><span class="k">tokens</span><span class="v" id="sTok">0</span></div>
+      <div class="kv"><span class="k">估算成本</span><span class="v" id="sCost">$0.0000</span></div>
+      <h3>上下文</h3>
+      <div class="bar"><i id="cBar" style="width:0%"></i></div>
+      <div class="kv"><span class="k" id="cLbl">还没开始</span><span class="v" id="cNum"></span></div>
+      <div class="hint" id="cHint"></div>
+      <h3>成员</h3>
+      <div id="memList"><div class="hint">—</div></div>
+      <h3>说明</h3>
+      <div class="hint" id="noteBox"></div>
     </div>
   </div>
 </main>
 
-<div class="insp">
-  <h3>花费</h3>
-  <div class="kv"><span class="k">tokens</span><span class="v" id="stTokens">0</span></div>
-  <div class="kv"><span class="k">估算成本</span><span class="v" id="stCost">$0.0000</span></div>
-
-  <h3>上下文</h3>
-  <div class="bar"><i id="ctxBar" style="width:0%"></i></div>
-  <div class="kv"><span class="k" id="ctxLabel">还没开始</span><span class="v" id="ctxNum"></span></div>
-  <div class="hint" id="ctxHint"></div>
-
-  <h3>每个模型</h3>
-  <table>
-    <thead><tr><th>模型</th><th class="n">tokens</th><th class="n">花费</th></tr></thead>
-    <tbody id="stBody"><tr><td colspan="3" style="color:var(--dim)">还没有发言</td></tr></tbody>
-  </table>
-  <h3>说明</h3>
-  <div class="hint" id="stNote"></div>
+<!-- 新对话 -->
+<div class="modal" id="mNew">
+  <div class="sheet">
+    <div class="sh">
+      <h2>新对话</h2>
+      <div class="desc">选一个模型是单聊，选多个就是群聊。</div>
+    </div>
+    <div class="sb">
+      <label class="lbl">名字（可留空，自动取成员名）</label>
+      <input id="nTitle" placeholder="比如：架构评审">
+      <label class="lbl">分类</label>
+      <input id="nCat" list="catList" placeholder="常用">
+      <datalist id="catList"></datalist>
+      <label class="lbl">选成员</label>
+      <div class="pick" id="nPick"></div>
+      <div class="err" id="nErr"></div>
+    </div>
+    <div class="sf">
+      <button class="btn ghost" data-close="mNew">取消</button>
+      <button class="btn" id="nGo">创建</button>
+    </div>
+  </div>
 </div>
 
-<!-- 首次引导 -->
-<div id="onb">
-  <div class="card">
-    <h1>先接上一个模型</h1>
-    <div class="sub">
-      填一次就够，之后不用再管。key 只存在你本机的
-      <code>~/.polylogue/config.json</code>，不会上传到任何地方。
+<!-- 新联系人 -->
+<div class="modal" id="mContact">
+  <div class="sheet">
+    <div class="sh">
+      <h2>添加模型</h2>
+      <div class="desc">填 provider 和模型 id。用 OpenRouter 的话填 <code>vendor/model</code>。</div>
     </div>
-    <div id="onbFound"></div>
-    <label>API key</label>
-    <div class="row2">
-      <select id="onbProvider">
-        <option value="openrouter">OpenRouter（一个 key 调所有厂商）</option>
-        <option value="openai">OpenAI</option>
-        <option value="claude">Claude（Anthropic）</option>
-        <option value="gemini">Gemini（Google）</option>
-        <option value="deepseek">DeepSeek</option>
-        <option value="grok">Grok（xAI）</option>
+    <div class="sb">
+      <div class="row2">
+        <div>
+          <label class="lbl">名字</label>
+          <input id="cName" placeholder="比如：Claude">
+        </div>
+        <div>
+          <label class="lbl">分类</label>
+          <input id="cCat" list="catList" placeholder="常用">
+        </div>
+      </div>
+      <label class="lbl">provider</label>
+      <select id="cProv"></select>
+      <label class="lbl">模型 id</label>
+      <input id="cModel" placeholder="anthropic/claude-haiku-4.5">
+      <label class="lbl">角色（可选）</label>
+      <select id="cRole">
+        <option value="">无</option>
+        <option value="critic">critic · 挑毛病</option>
+        <option value="builder">builder · 出方案</option>
+        <option value="explorer">explorer · 查漏</option>
+        <option value="reviewer">reviewer · 复核</option>
       </select>
-      <input id="onbKey" type="password" placeholder="粘贴 key" autocomplete="off">
+      <div class="err" id="cErr"></div>
     </div>
-    <label>模型档位</label>
-    <div class="tiers" id="onbTiers">
-      <div class="tier on" data-tier="省钱"><b>省钱</b><small>日常够用<br>约 ¥0.01/轮</small></div>
-      <div class="tier" data-tier="强力"><b>强力</b><small>claude+GPT+Gemini<br>质量最好</small></div>
-      <div class="tier" data-tier="免费"><b>免费</b><small>不花钱<br>可能限流</small></div>
-    </div>
-    <div class="err" id="onbErr"></div>
-    <div class="acts">
-      <button id="onbGo">开始</button>
+    <div class="sf">
+      <button class="btn ghost" data-close="mContact">取消</button>
+      <button class="btn" id="cGo">添加</button>
     </div>
   </div>
 </div>
 
 <!-- 设置 -->
-<div id="set">
-  <div class="card">
-    <h1>设置</h1>
-    <div class="sub" style="margin-bottom:8px">改了立即生效，存在本地。</div>
-    <label>模型档位（会重建房间，清空当前转录）</label>
-    <div class="tiers" id="setTiers">
-      <div class="tier" data-tier="省钱"><b>省钱</b><small>日常够用</small></div>
-      <div class="tier" data-tier="强力"><b>强力</b><small>质量最好</small></div>
-      <div class="tier" data-tier="免费"><b>免费</b><small>可能限流</small></div>
-    </div>
-    <label>上下文压缩</label>
-    <div class="chk"><input type="checkbox" id="setCompress" checked><span>开启（推荐，长对话省钱）</span></div>
-    <div class="row2" style="margin-top:10px">
-      <div>
-        <label style="margin-top:0">逐字保留最近几条</label>
-        <input type="number" id="setKeep" min="2" max="40" value="8">
+<div class="modal" id="mSet">
+  <div class="sheet">
+    <div class="sh"><h2>设置</h2><div class="desc">改了立即生效，存在本机。</div></div>
+    <div class="sb">
+      <label class="lbl">外观</label>
+      <div class="row2">
+        <button class="btn ghost" id="thDark">深色</button>
+        <button class="btn ghost" id="thLight">浅色</button>
       </div>
-      <div>
-        <label style="margin-top:0">上下文上限（token）</label>
-        <input type="number" id="setBudget" min="500" step="500" value="6000">
+      <label class="lbl">上下文压缩</label>
+      <label class="chk"><input type="checkbox" id="setCompress"><span>开启（推荐，长对话省钱）</span></label>
+      <div class="row2" style="margin-top:10px">
+        <div>
+          <label class="lbl" style="margin-top:0">逐字保留最近几条</label>
+          <input type="number" id="setKeep" min="2" max="40" value="8">
+        </div>
+        <div>
+          <label class="lbl" style="margin-top:0">上下文上限（token）</label>
+          <input type="number" id="setBudget" min="500" step="500" value="6000">
+        </div>
       </div>
-    </div>
-    <div class="row2" style="margin-top:10px">
-      <div>
-        <label style="margin-top:0">单轮上限</label>
-        <input type="number" id="setRounds" min="1" value="6">
+      <div class="row2" style="margin-top:10px">
+        <div>
+          <label class="lbl" style="margin-top:0">单轮上限</label>
+          <input type="number" id="setRounds" min="1" value="6">
+        </div>
+        <div>
+          <label class="lbl" style="margin-top:0">成本上限（美元）</label>
+          <input type="number" id="setCost" step="0.1" value="0.5">
+        </div>
       </div>
-      <div>
-        <label style="margin-top:0">成本上限（美元）</label>
-        <input type="number" id="setCost" step="0.1" value="0.5">
+      <div class="err" id="setErr"></div>
+    </div>
+    <div class="sf">
+      <button class="btn ghost" data-close="mSet">取消</button>
+      <button class="btn" id="setGo">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 首次引导 -->
+<div class="modal" id="mOnb">
+  <div class="sheet">
+    <div class="sh">
+      <h2>先接上一个模型</h2>
+      <div class="desc">填一次就够，之后不用再管。key 只存在本机
+        <code>~/.polylogue/config.json</code>，不会上传。</div>
+    </div>
+    <div class="sb">
+      <div id="onbFound"></div>
+      <div class="row2">
+        <div>
+          <label class="lbl">provider</label>
+          <select id="onbProv">
+            <option value="openrouter">OpenRouter（一个 key 调所有厂商）</option>
+            <option value="openai">OpenAI</option>
+            <option value="claude">Claude</option>
+            <option value="gemini">Gemini</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="grok">Grok</option>
+          </select>
+        </div>
+        <div>
+          <label class="lbl">API key</label>
+          <input id="onbKey" type="password" placeholder="粘贴 key" autocomplete="off">
+        </div>
       </div>
+      <div class="err" id="onbErr"></div>
     </div>
-    <div class="err" id="setErr"></div>
-    <div class="acts">
-      <button class="ghost" id="setCancel">取消</button>
-      <button id="setSave">保存</button>
-    </div>
+    <div class="sf"><button class="btn" id="onbGo">开始</button></div>
   </div>
 </div>
 
 <script>
 const $ = i => document.getElementById(i);
-const S = { info:null, rooms:[], current:null, running:false, tier:"省钱" };
+const S = {
+  info:null, contacts:[], cats:[], convs:[], cur:null, conv:null,
+  theme:"dark", tab:"chats", q:"", hits:null, running:false, closed:new Set()
+};
 
-const hue = n => { let h=0; for (const c of n) h=(h*31+c.charCodeAt(0))%360; return h; };
-const colorFor = n => n==="user" ? "#8b94a8" : n==="system" ? "#f87171" : `hsl(${hue(n)},64%,68%)`;
-const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt = n => (n==null? "?": n.toLocaleString());
-const money = c => c==null? "未知" : "$"+c.toFixed(4);
-const initial = n => (n||"?").slice(0,1).toUpperCase();
+/* ───────── 小工具 ───────── */
+const esc = s => String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = n => (n==null? "?": Number(n).toLocaleString());
+const money = c => c==null? "未知" : "$"+Number(c).toFixed(4);
+const avUrl = key => "/api/avatar/" + encodeURIComponent(key||"generic");
+const contactOf = id => S.contacts.find(c=>c.id===id);
+const cname = id => (contactOf(id)||{}).name || id;
 
 async function api(path, opt){
   const r = await fetch(path, opt);
@@ -278,226 +441,354 @@ async function api(path, opt){
   if(!r.ok) throw new Error((d&&d.error)||("HTTP "+r.status));
   return d;
 }
+const post = (p,b) => api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})});
+const patch = (p,b) => api(p,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})});
+const del = p => api(p,{method:"DELETE"});
 
-/* ───────── 引导 ───────── */
-function showOnboarding(info){
-  const found = (info.detected && info.detected.providers) || [];
-  const box = $("onbFound");
-  box.innerHTML = "";
-  if(found.length){
-    for(const p of found){
-      const d = document.createElement("div");
-      d.className = "found";
-      d.innerHTML = `<span class="ok">✓</span>
-        <div class="txt2">检测到 <b>${esc(p.name)}</b> 的 key
-          <small>${esc(p.masked)} · ${esc(p.source||"本机")}</small></div>`;
-      const b = document.createElement("button");
-      b.textContent = "就用这个";
-      b.onclick = () => submitSetup({ preset: S.tier });
-      d.appendChild(b);
-      box.appendChild(d);
-    }
-  }
-  $("onb").classList.add("open");
+/* ───────── 主题 ───────── */
+function applyTheme(t){
+  S.theme = t === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = S.theme;
+  $("btnTheme").textContent = S.theme === "dark" ? "◐" : "◑";
+}
+async function setTheme(t){
+  applyTheme(t);
+  try{ await post("/api/settings", {theme:S.theme}); }catch(e){}
 }
 
-async function submitSetup(extra){
-  $("onbErr").textContent = "";
-  const body = Object.assign({
-    provider: $("onbProvider").value,
-    api_key: $("onbKey").value.trim(),
-    preset: S.tier,
-  }, extra||{});
-  try{
-    const d = await api("/api/setup", {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
-    });
-    $("onb").classList.remove("open");
-    S.info = d.info;
-    await refresh(d.info);
-  }catch(e){
-    $("onbErr").textContent = e.message;
-  }
-}
-
-/* ───────── 房间 ───────── */
+/* ───────── 载入 ───────── */
 async function refresh(info){
-  if(info) S.info = info;
-  else S.info = await api("/api/info");
+  S.info = info || await api("/api/info");
+  S.contacts = S.info.contacts || [];
+  S.cats = S.info.categories || [];
+  S.convs = S.info.conversations || [];
+  applyTheme(S.info.theme || "dark");
 
-  const i = S.info;
-  $("hdrMode").textContent = i.origin || "";
-  $("stNote").innerHTML = `价格表 ${esc(i.price_table)}，估算值，以各家官网为准。`
-    + (i.skipped && i.skipped.length
-        ? `<br><span style="color:var(--warn)">跳过：${i.skipped.map(esc).join("；")}</span>` : "");
+  $("modePill").textContent = S.info.origin || "";
+  $("noteBox").innerHTML = "价格表 " + esc(S.info.price_table) + "，估算值，以各家官网为准。"
+    + (S.info.skipped && S.info.skipped.length
+        ? '<br><span style="color:var(--warn)">跳过：'+S.info.skipped.map(esc).join("；")+"</span>" : "");
 
-  if(i.onboarding){ showOnboarding(i); return; }
-
-  S.rooms = i.rooms || [];
-  renderRooms();
-  if(!S.current || !S.rooms.some(r=>r.id===S.current)){
-    if(i.default_room) await selectRoom(i.default_room);
-    else if(S.rooms.length) await selectRoom(S.rooms[0].id);
+  $("catList").innerHTML = S.cats.map(c=>`<option value="${esc(c)}">`).join("");
+  const provSel = $("cProv");
+  if(provSel.options.length === 0){
+    provSel.innerHTML = (S.info.providers||[]).map(p=>
+      `<option value="${esc(p.name)}"${p.name==="openrouter"?" selected":""}>${esc(p.name)}${p.available?"":"（没 key）"}</option>`
+    ).join("");
   }
+
+  if(S.info.onboarding){ showOnboarding(); }
+  renderList();
+
+  const pick = S.cur && S.convs.find(c=>c.id===S.cur) ? S.cur
+             : (S.convs.length ? S.convs[0].id : null);
+  if(pick) await openConv(pick, true);
+  else renderEmpty();
 }
 
-function renderRooms(){
-  const box = $("rooms");
+/* ───────── 左栏 ───────── */
+function renderList(){
+  const box = $("list");
   box.innerHTML = "";
-  if(!S.rooms.length){
-    box.innerHTML = '<div class="hint" style="padding:10px">还没有房间</div>';
+  if(S.tab === "chats") renderChats(box); else renderContacts(box);
+}
+
+function groupBy(items, keyFn){
+  const m = new Map();
+  for(const it of items){
+    const k = keyFn(it) || "其他";
+    if(!m.has(k)) m.set(k, []);
+    m.get(k).push(it);
+  }
+  return m;
+}
+
+function renderChats(box){
+  if(!S.convs.length){
+    box.innerHTML = '<div class="railempty">还没有对话<br>点上面「＋ 新对话」</div>';
     return;
   }
-  for(const r of S.rooms){
-    const el = document.createElement("div");
-    el.className = "room" + (r.id===S.current ? " active":"");
-    el.innerHTML = `<div class="nm">${esc(r.name)}</div>
-      <div class="n">${r.turns}</div><span class="x" title="删除">×</span>`;
-    el.onclick = e => {
-      if(e.target.classList.contains("x")){ delRoom(r.id); return; }
-      selectRoom(r.id);
+  const order = [...S.cats, "其他"];
+  const grouped = groupBy(S.convs, c=>c.category);
+  const keys = [...grouped.keys()].sort((a,b)=>{
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia<0?999:ia) - (ib<0?999:ib);
+  });
+
+  for(const cat of keys){
+    const rows = grouped.get(cat);
+    const closed = S.closed.has("c:"+cat);
+    const g = document.createElement("div");
+    g.className = "grp";
+    g.innerHTML = `<div class="grph${closed?" closed":""}" data-g="c:${esc(cat)}">
+        <span class="cv">▾</span>${esc(cat)}<span class="n">${rows.length}</span></div>`;
+    g.querySelector(".grph").onclick = () => {
+      const k = "c:"+cat;
+      S.closed.has(k) ? S.closed.delete(k) : S.closed.add(k);
+      renderList();
     };
-    box.appendChild(el);
+    if(!closed) for(const c of rows) g.appendChild(convItem(c));
+    box.appendChild(g);
   }
 }
 
-async function delRoom(id){
-  if(!confirm("删除这个房间？转录会一起没掉。")) return;
-  await api("/api/rooms/"+id, {method:"DELETE"});
-  if(S.current===id) S.current = null;
-  await refresh();
+function convItem(c){
+  const el = document.createElement("div");
+  el.className = "item" + (c.id===S.cur ? " on" : "");
+  const mems = (c.members||[]).slice(0,3);
+  const av = mems.length > 1
+    ? `<div class="av stack">${mems.map(id=>`<img src="${avUrl(id)}" alt="">`).join("")}</div>`
+    : `<div class="av"><img src="${avUrl(mems[0]||"generic")}" alt=""></div>`;
+  el.innerHTML = `${av}
+    <div class="meta">
+      <div class="nm">${esc(c.title)}${c.kind==="dm"?'<span class="badge">单聊</span>':''}</div>
+      <div class="sub">${esc(c.last || (c.turns? c.turns+" 条":"空对话"))}</div>
+    </div>
+    <div class="acts2">
+      <button title="改名">✎</button>
+      <button title="删除">✕</button>
+    </div>`;
+  el.onclick = e => {
+    const bs = el.querySelectorAll(".acts2 button");
+    if(e.target === bs[0]){ renameConv(c); return; }
+    if(e.target === bs[1]){ deleteConv(c); return; }
+    openConv(c.id);
+  };
+  return el;
 }
 
-async function selectRoom(id){
-  S.current = id;
-  const d = await api("/api/rooms/"+id);
-  $("hdrRoom").textContent = d.name + " · " + d.members.join(" / ");
-  renderChips(d.members);
-  renderLog(d.turns);
-  paint({
-    tokens: d.tokens, cost: d.cost, unknown: d.cost_unknown,
-    by_model: null, compression: d.compression
+function renderContacts(box){
+  if(!S.contacts.length){
+    box.innerHTML = '<div class="railempty">通讯录是空的<br>点下面添加</div>';
+    return;
+  }
+  const order = [...S.cats, "其他"];
+  const grouped = groupBy(S.contacts, c=>c.category);
+  const keys = [...grouped.keys()].sort((a,b)=>{
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia<0?999:ia) - (ib<0?999:ib);
   });
-  renderRooms();
+
+  for(const cat of keys){
+    const rows = grouped.get(cat);
+    const closed = S.closed.has("p:"+cat);
+    const g = document.createElement("div");
+    g.className = "grp";
+    g.innerHTML = `<div class="grph${closed?" closed":""}">
+        <span class="cv">▾</span>${esc(cat)}<span class="n">${rows.length}</span></div>`;
+    g.querySelector(".grph").onclick = () => {
+      const k = "p:"+cat;
+      S.closed.has(k) ? S.closed.delete(k) : S.closed.add(k);
+      renderList();
+    };
+    if(!closed) for(const c of rows) g.appendChild(contactItem(c));
+    box.appendChild(g);
+  }
+  const add = document.createElement("div");
+  add.className = "grp";
+  add.innerHTML = '<button class="btn ghost" style="width:100%;font-size:12px;padding:8px 0;margin-top:8px">＋ 添加模型</button>';
+  add.querySelector("button").onclick = openContactModal;
+  box.appendChild(add);
 }
 
-/* ───────── 对话 ───────── */
-function renderChips(members){
-  const box = $("chips"); box.innerHTML = "";
-  for(const m of members){
+function contactItem(c){
+  const el = document.createElement("div");
+  el.className = "item";
+  el.innerHTML = `<div class="av"><img src="${avUrl(c.id)}" alt=""></div>
+    <div class="meta">
+      <div class="nm">${esc(c.name)}</div>
+      <div class="sub">${esc(c.model || c.provider)}</div>
+    </div>
+    <div class="acts2">
+      <button title="换头像">▣</button>
+      <button title="删除">✕</button>
+    </div>`;
+  const bs = el.querySelectorAll(".acts2 button");
+  bs[0].onclick = e => { e.stopPropagation(); pickAvatar(c); };
+  bs[1].onclick = async e => {
+    e.stopPropagation();
+    if(!confirm("从通讯录移除 " + c.name + "？已有的对话记录不受影响。")) return;
+    await del("/api/contacts/" + c.id);
+    await refresh();
+  };
+  el.onclick = () => startDM(c);
+  return el;
+}
+
+/* ───────── 打开会话 ───────── */
+async function openConv(id, keepScroll){
+  S.hits = null;
+  S.cur = id;
+  S.conv = await api("/api/conversations/" + id);
+  $("ttl").textContent = S.conv.title;
+  $("ttl").className = "ttl";
+  renderList();
+  renderMemAv();
+  renderChips();
+  renderLog(S.conv.turns);
+  paint(S.conv);
+  $("input").focus();
+}
+
+function renderMemAv(){
+  const box = $("memAv");
+  const mems = (S.conv && S.conv.members) || [];
+  box.innerHTML = mems.slice(0,5).map(id=>`<img src="${avUrl(id)}" title="${esc(cname(id))}">`).join("");
+}
+
+function renderChips(){
+  const box = $("chips");
+  box.innerHTML = "";
+  if(!S.conv) return;
+  for(const id of S.conv.members || []){
     const c = document.createElement("span");
-    c.className = "chip"; c.textContent = "@"+m; c.style.color = colorFor(m);
+    c.className = "chip";
+    c.innerHTML = `<img src="${avUrl(id)}">@${esc(cname(id))}`;
     c.onclick = () => {
       const t = $("input");
-      t.value = (t.value.replace(/\s*$/,"") + " @" + m + " ").trimStart();
+      t.value = (t.value.replace(/\s+$/,"") + " @" + cname(id) + " ").trimStart();
       t.focus();
     };
     box.appendChild(c);
   }
 }
 
-function msgEl(speaker, text, cls){
+function renderLog(turns){
+  const log = $("log");
+  log.innerHTML = "";
+  if(!turns || !turns.length){ renderEmpty(); return; }
+  for(const t of turns) log.appendChild(msgRow(t));
+  log.scrollTop = log.scrollHeight;
+}
+
+function msgRow(t){
+  const mine = t.role === "user";
   const el = document.createElement("div");
-  el.className = "msg " + (cls||"");
+  el.className = "row" + (mine ? " me" : "") + (t.error ? " err" : "");
+
   const av = document.createElement("div");
   av.className = "av";
-  av.style.background = colorFor(speaker);
-  av.textContent = initial(speaker);
+  const key = mine ? "generic" : (t.speaker_id || t.speaker);
+  av.innerHTML = mine ? "你" : `<img src="${avUrl(key)}" alt="">`;
+
   const body = document.createElement("div");
-  body.className = "body";
   const who = document.createElement("div");
-  who.className = "who"; who.textContent = speaker; who.style.color = colorFor(speaker);
-  const txt = document.createElement("div");
-  txt.className = "txt";
-  txt.innerHTML = esc(text).replace(/@([A-Za-z0-9_-]+)/g,'<span class="mention">@$1</span>');
-  body.appendChild(who); body.appendChild(txt);
+  who.className = "who";
+  who.textContent = mine ? "你" : (t.speaker || "");
+  if(!mine && t.tokens) {
+    const tk = document.createElement("span");
+    tk.className = "tk"; tk.textContent = t.tokens + " tok";
+    who.appendChild(tk);
+  }
+  const bub = document.createElement("div");
+  bub.className = "bub";
+  bub.innerHTML = esc(t.error || t.content || "").replace(/@([A-Za-z0-9_\u4e00-\u9fa5-]+)/g,
+    '<span class="mention">@$1</span>');
+  body.appendChild(who); body.appendChild(bub);
   el.appendChild(av); el.appendChild(body);
   return el;
 }
 
-function renderLog(turns){
-  const log = $("log"); log.innerHTML = "";
-  if(!turns || !turns.length){
-    log.innerHTML = `<div class="empty">还没有对话<br>
-      不 <kbd>@</kbd> 任何人 = 同时问所有成员<br>
-      <kbd>@名字</kbd> = 只说给某个人听</div>`;
-    return;
-  }
-  for(const t of turns){
-    if(t.role==="user" && t.speaker==="user") log.appendChild(msgEl("你", t.content, "user"));
-    else if(t.error) log.appendChild(msgEl(t.speaker, t.error, "err"));
-    else log.appendChild(msgEl(t.speaker, t.content));
-  }
-  log.scrollTop = log.scrollHeight;
-}
-
-function append(speaker, text, cls){
+function appendRow(t){
   const log = $("log");
-  const e = log.querySelector(".empty"); if(e) e.remove();
-  log.appendChild(msgEl(speaker, text, cls));
+  const e = log.querySelector(".bigempty"); if(e) e.remove();
+  log.appendChild(msgRow(t));
   log.scrollTop = log.scrollHeight;
 }
 
-/* ───────── 统计 ───────── */
+function renderEmpty(){
+  const log = $("log");
+  log.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "bigempty";
+  if(!S.convs.length){
+    box.innerHTML = `<div class="h">还没有对话</div>
+      <div>左边「＋ 新对话」选一个模型开始单聊<br>选多个就是群聊</div>`;
+    const cards = document.createElement("div");
+    cards.className = "cards";
+    for(const c of S.contacts.slice(0,4)){
+      const d = document.createElement("div");
+      d.className = "card";
+      d.innerHTML = `<img src="${avUrl(c.id)}" style="width:34px;height:34px;border-radius:10px;margin-bottom:7px">
+        <b>${esc(c.name)}</b><small>${esc((c.model||"").split("/").pop()||c.provider)}</small>`;
+      d.onclick = () => startDM(c);
+      cards.appendChild(d);
+    }
+    box.appendChild(cards);
+  } else {
+    box.innerHTML = `<div class="h">这个对话还是空的</div>
+      <div>不 <kbd>@</kbd> 任何人 = 全员回答<br><kbd>@名字</kbd> = 只说给某个人听</div>`;
+  }
+  log.appendChild(box);
+}
+
+/* ───────── 统计面板 ───────── */
 function paint(d){
-  $("stTokens").textContent = fmt(d.tokens);
-  $("stCost").textContent = money(d.cost) + (d.unknown ? "+" : "");
-  if(d.by_model) renderStats(d.by_model);
+  $("sTok").textContent = fmt(d.tokens);
+  $("sCost").textContent = money(d.cost) + (d.cost_unknown ? "+" : "");
+  $("costTop").textContent = d.tokens ? `${fmt(d.tokens)} tok · ${money(d.cost)}` : "";
   paintCompression(d.compression);
+  paintMembers(d);
 }
 
 function paintCompression(c){
-  const bar = $("ctxBar"), label = $("ctxLabel"), num = $("ctxNum"), hint = $("ctxHint");
+  const bar = $("cBar"), lbl = $("cLbl"), num = $("cNum"), hint = $("cHint");
   if(!c || (!c.compressed && !c.raw_tokens)){
-    bar.style.width = "0%"; label.textContent = "还没开始"; num.textContent = ""; hint.textContent = "";
-    return;
+    bar.style.width="0%"; lbl.textContent="还没开始"; num.textContent=""; hint.textContent=""; return;
   }
   if(c.skipped){
-    bar.style.width = "4%"; label.textContent = "无需压缩";
-    num.textContent = "";
-    hint.textContent = "发言还短，压缩反而更大，已自动跳过。";
-    return;
+    bar.style.width="4%"; lbl.textContent="无需压缩"; num.textContent="";
+    hint.textContent="发言还短，压缩反而更大，已自动跳过。"; return;
   }
   if(!c.compressed){
-    bar.style.width = "6%"; label.textContent = "未触发"; num.textContent = "";
-    hint.textContent = "还没到保留条数，全部逐字发送。";
-    return;
+    bar.style.width="6%"; lbl.textContent="未触发"; num.textContent="";
+    hint.textContent="还没到保留条数，全部逐字发送。"; return;
   }
-  const raw = c.raw_tokens || 1, dig = c.digest_tokens || 0;
-  const saved = Math.max(0, 1 - dig / raw);
-  bar.style.width = Math.min(100, Math.max(8, (1-saved)*100)) + "%";
-  label.textContent = `较早的 ${c.older_turns} 条已压缩`;
+  const raw = c.raw_tokens||1, dig = c.digest_tokens||0;
+  const saved = Math.max(0, 1 - dig/raw);
+  bar.style.width = Math.min(100, Math.max(8,(1-saved)*100)) + "%";
+  lbl.textContent = `较早的 ${c.older_turns} 条已压缩`;
   num.textContent = `${fmt(dig)} / ${fmt(raw)}`;
   hint.innerHTML = `省下 <b style="color:var(--ok)">${(saved*100).toFixed(0)}%</b> 的早期上下文`
-    + (c.dropped ? `<br><span style="color:var(--warn)">超预算，另外省略了 ${c.dropped} 条</span>` : "");
+    + (c.dropped ? `<br><span style="color:var(--warn)">超预算，另省略 ${c.dropped} 条</span>` : "");
 }
 
-function renderStats(rows){
-  const b = $("stBody");
-  if(!rows || !rows.length){
-    b.innerHTML = '<tr><td colspan="3" style="color:var(--dim)">还没有发言</td></tr>';
-    return;
+function paintMembers(d){
+  const box = $("memList");
+  const mems = (S.conv && S.conv.members) || [];
+  if(!mems.length){ box.innerHTML = '<div class="hint">—</div>'; return; }
+  const per = {};
+  for(const t of (S.conv && S.conv.turns) || []){
+    if(t.role !== "assistant") continue;
+    const k = t.speaker_id || t.speaker;
+    per[k] = per[k] || {tok:0, cost:0};
+    per[k].tok += Number(t.tokens||0);
+    per[k].cost += Number(t.cost||0);
   }
-  b.innerHTML = rows.map(r => `<tr>
-    <td><span class="sw" style="background:${colorFor(r.speaker)}"></span>${esc(r.speaker)}</td>
-    <td class="n">${fmt(r.tokens)}</td>
-    <td class="n">${r.unknown? "未知" : money(r.cost)}</td></tr>`).join("");
+  box.innerHTML = mems.map(id=>{
+    const p = per[id] || {tok:0,cost:0};
+    return `<div class="memb"><img src="${avUrl(id)}"><span>${esc(cname(id))}</span>
+      <span class="c">${fmt(p.tok)}</span></div>`;
+  }).join("");
 }
 
 /* ───────── 发言 ───────── */
 async function say(){
   const t = $("input").value.trim();
-  if(!t || S.running || !S.current) return;
+  if(!t || S.running || !S.cur) return;
   $("input").value = "";
-  append("你", t, "user");
+  appendRow({role:"user", content:t, speaker:"你"});
   setRunning(true);
-  let pending = msgEl("…", "等待回应", "note");
+
+  const pending = document.createElement("div");
+  pending.className = "note";
+  pending.innerHTML = '<div class="txt">等待回应…</div>';
   $("log").appendChild(pending);
+  $("log").scrollTop = $("log").scrollHeight;
 
   try{
-    const r = await fetch(`/api/rooms/${S.current}/say`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({text:t})
+    const r = await fetch(`/api/conversations/${S.cur}/say`, {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:t})
     });
     if(!r.ok){
       const e = await r.json().catch(()=>({}));
@@ -516,19 +807,20 @@ async function say(){
         if(!chunk.startsWith("data: ")) continue;
         let ev; try{ ev = JSON.parse(chunk.slice(6)); }catch{ continue; }
 
-        if((ev.type==="turn"||ev.type==="error") && first){ pending.remove(); first = false; }
-        if(ev.type==="turn") append(ev.speaker, ev.content);
-        else if(ev.type==="error") append(ev.speaker, ev.message, "err");
-        else if(ev.type==="done"){
+        if(ev.type === "turn" || ev.type === "error"){
           if(first){ pending.remove(); first = false; }
-          paint({tokens:ev.tokens, cost:ev.cost, unknown:ev.cost_unknown,
-                 by_model:ev.stats, compression:ev.compression});
+          appendRow({role:"assistant", speaker:ev.speaker, content:ev.content,
+                     error: ev.type==="error" ? ev.message : null,
+                     tokens:ev.tokens, speaker_id: (S.conv&&S.conv.names||{})[ev.speaker]});
+        } else if(ev.type === "done"){
+          if(first){ pending.remove(); first = false; }
+          if(ev.conversation){ S.conv = Object.assign({}, S.conv, ev.conversation); }
+          paint({tokens:ev.tokens, cost:ev.cost, cost_unknown:ev.cost_unknown,
+                 compression:ev.compression});
           if(ev.stop){
             const n = document.createElement("div");
-            n.className = "msg note";
-            const b2 = document.createElement("div");
-            b2.className = "txt"; b2.textContent = "— " + ev.stop;
-            n.appendChild(b2);
+            n.className = "note";
+            n.innerHTML = '<div class="txt">— ' + esc(ev.stop) + "</div>";
             $("log").appendChild(n);
             $("log").scrollTop = $("log").scrollHeight;
           }
@@ -537,7 +829,7 @@ async function say(){
     }
   }catch(e){
     pending.remove();
-    append("system", "请求失败：" + e.message, "err");
+    appendRow({role:"assistant", speaker:"system", content:"请求失败："+e.message, error:e.message});
   }finally{
     setRunning(false);
     $("input").focus();
@@ -547,111 +839,315 @@ async function say(){
 
 function setRunning(on){
   S.running = on;
-  $("send").disabled = on;
-  $("send").textContent = on ? "会商中…" : "发送";
-  $("btnStop").disabled = !on;
-  if(!on) $("btnStop").textContent = "停止";
+  $("btnSend").style.display = on ? "none" : "";
+  $("btnStop").style.display = on ? "" : "none";
+  $("btnSend").disabled = on;
 }
 
 async function stopRun(){
-  if(!S.current) return;
+  if(!S.cur) return;
   $("btnStop").disabled = true;
-  $("btnStop").textContent = "停止中…";
-  await api(`/api/rooms/${S.current}/stop`, {method:"POST"});
+  await api(`/api/conversations/${S.cur}/stop`, {method:"POST"});
+  $("btnStop").disabled = false;
 }
 
-/* ───────── 设置 ───────── */
+/* ───────── 会话操作 ───────── */
+async function startDM(contact){
+  const exist = S.convs.find(c=>c.kind==="dm" && (c.members||[]).length===1 && c.members[0]===contact.id);
+  if(exist){ S.tab="chats"; syncTabs(); await openConv(exist.id); return; }
+  const c = await post("/api/conversations", {members:[contact.id], title:contact.name, category:contact.category});
+  S.tab = "chats"; syncTabs();
+  await refresh();
+  await openConv(c.id);
+}
+
+async function renameConv(c){
+  const t = prompt("改个名字", c.title);
+  if(t == null) return;
+  const title = t.trim();
+  if(!title || title === c.title) return;
+  await patch("/api/conversations/" + c.id, {title});
+  if(S.cur === c.id) $("ttl").textContent = title;
+  await refresh();
+}
+
+async function deleteConv(c){
+  if(!confirm(`删除「${c.title}」？聊天记录会一起没掉。`)) return;
+  await del("/api/conversations/" + c.id);
+  if(S.cur === c.id) S.cur = null;
+  await refresh();
+}
+
+async function renameInline(){
+  if(!S.conv) return;
+  const el = $("ttl");
+  const old = S.conv.title;
+  const input = document.createElement("input");
+  input.className = "rename"; input.value = old;
+  el.replaceWith(input);
+  input.focus(); input.select();
+  const finish = async ok => {
+    const v = input.value.trim();
+    const t = document.createElement("div");
+    t.id = "ttl"; t.className = "ttl"; t.onclick = renameInline;
+    if(ok && v && v !== old){
+      try{ await patch("/api/conversations/" + S.conv.id, {title:v}); S.conv.title = v; }catch(e){}
+      t.textContent = v;
+    } else t.textContent = old;
+    input.replaceWith(t);
+    if(ok && v && v !== old) refresh();
+  };
+  input.onblur = () => finish(true);
+  input.onkeydown = e => {
+    if(e.key === "Enter"){ e.preventDefault(); input.blur(); }
+    if(e.key === "Escape"){ input.onblur = null; finish(false); }
+  };
+}
+
+/* ───────── 头像 ───────── */
+function pickAvatar(contact){
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = "image/*";
+  inp.onchange = () => {
+    const f = inp.files && inp.files[0];
+    if(!f) return;
+    if(f.size > 900*1024){ alert("图片太大，选 900KB 以内的"); return; }
+    const rd = new FileReader();
+    rd.onload = async () => {
+      try{
+        await post("/api/avatar/" + contact.id, {data: rd.result});
+        await refresh();
+        if(S.cur) await openConv(S.cur, true);
+      }catch(e){ alert("上传失败：" + e.message); }
+    };
+    rd.readAsDataURL(f);
+  };
+  inp.click();
+}
+
+/* ───────── 搜索 ───────── */
+let qTimer = null;
+function onSearch(){
+  clearTimeout(qTimer);
+  const q = $("q").value.trim();
+  S.q = q;
+  if(!q){ S.hits = null; if(S.conv) renderLog(S.conv.turns); else renderEmpty(); return; }
+  qTimer = setTimeout(doSearch, 220);
+}
+
+async function doSearch(){
+  try{
+    const d = await api("/api/search?q=" + encodeURIComponent(S.q));
+    S.hits = d.hits || [];
+    renderHits();
+  }catch(e){ S.hits = []; renderHits(); }
+}
+
+function renderHits(){
+  const log = $("log");
+  log.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "hithead";
+  head.textContent = S.q ? `「${S.q}」找到 ${S.hits.length} 处` : "";
+  log.appendChild(head);
+
+  if(!S.hits.length){
+    const e = document.createElement("div");
+    e.className = "bigempty";
+    e.innerHTML = '<div class="h">没有找到</div><div>换个词试试</div>';
+    log.appendChild(e);
+    return;
+  }
+  const q = S.q.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  for(const h of S.hits){
+    const el = document.createElement("div");
+    el.className = "hit";
+    el.innerHTML = `<div class="t">${esc(h.title)}<span class="w">${esc(h.where)}</span></div>
+      <div class="s">${esc(h.snippet).replace(new RegExp("("+q+")","gi"),"<mark>$1</mark>")}</div>`;
+    el.onclick = () => { $("q").value = ""; S.q=""; S.hits=null; openConv(h.conversation); };
+    log.appendChild(el);
+  }
+}
+
+/* ───────── 弹层 ───────── */
+function openModal(id){ $(id).classList.add("open"); }
+function closeModal(id){ $(id).classList.remove("open"); }
+document.querySelectorAll("[data-close]").forEach(b=>{
+  b.onclick = () => closeModal(b.dataset.close);
+});
+document.querySelectorAll(".modal").forEach(m=>{
+  m.onclick = e => { if(e.target === m) m.classList.remove("open"); };
+});
+
+let pickSel = new Set();
+function openNewModal(){
+  pickSel = new Set();
+  $("nTitle").value = "";
+  $("nCat").value = "常用";
+  $("nErr").textContent = "";
+  const box = $("nPick");
+  box.innerHTML = "";
+  for(const c of S.contacts){
+    const el = document.createElement("div");
+    el.className = "p";
+    el.innerHTML = `<img src="${avUrl(c.id)}"><div><div class="nm">${esc(c.name)}</div>
+      <div class="sub">${esc((c.model||"").split("/").pop()||c.provider)}</div></div>`;
+    el.onclick = () => {
+      if(pickSel.has(c.id)){ pickSel.delete(c.id); el.classList.remove("on"); }
+      else { pickSel.add(c.id); el.classList.add("on"); }
+    };
+    box.appendChild(el);
+  }
+  openModal("mNew");
+}
+
+function openContactModal(){
+  $("cName").value = ""; $("cModel").value = ""; $("cCat").value = "常用";
+  $("cErr").textContent = "";
+  openModal("mContact");
+}
+
 function openSettings(){
   const c = (S.info && S.info.context) || {};
+  const b = (S.info && S.info.budget) || {};
   $("setCompress").checked = c.enabled !== false;
   $("setKeep").value = c.keep_recent || 8;
   $("setBudget").value = c.budget_tokens || 6000;
-  const r = S.rooms.find(x=>x.id===S.current);
-  if(r && r.budget){
-    $("setRounds").value = r.budget.max_rounds || 6;
-    $("setCost").value = r.budget.max_cost_usd ?? 0.5;
-  }
-  $("set").classList.add("open");
+  $("setRounds").value = b.max_rounds || 6;
+  $("setCost").value = b.max_cost_usd ?? 0.5;
+  $("setErr").textContent = "";
+  openModal("mSet");
 }
 
-async function saveSettings(){
-  $("setErr").textContent = "";
-  const body = {
-    context: {
-      enabled: $("setCompress").checked,
-      keep_recent: parseInt($("setKeep").value) || 8,
-      budget_tokens: parseInt($("setBudget").value) || 6000,
-    },
-    budget: {
-      max_rounds: parseInt($("setRounds").value) || 6,
-      max_cost_usd: parseFloat($("setCost").value) || null,
-    },
-  };
-  if(S.tier !== (S.info && S.info.context && S.info.context._tier)){
-    const rows = (S.info.presets || {})[S.tier];
-    if(rows) body.members = rows;
+function showOnboarding(){
+  const found = (S.info.detected && S.info.detected.providers) || [];
+  const box = $("onbFound");
+  box.innerHTML = "";
+  for(const p of found){
+    const d = document.createElement("div");
+    d.className = "p on";
+    d.style.cssText = "display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:10px;border:1.5px solid var(--accent);background:var(--accent-soft);margin-bottom:8px;cursor:pointer";
+    d.innerHTML = `<span style="color:var(--ok)">✓</span>
+      <div style="flex:1;font-size:13px">检测到 <b>${esc(p.name)}</b> 的 key
+        <div style="color:var(--dim);font-size:11px">${esc(p.masked)} · ${esc(p.source||"本机")}</div></div>
+      <button class="btn" style="font-size:12px;padding:5px 11px">就用这个</button>`;
+    d.querySelector("button").onclick = () => submitOnb({preset:"省钱"});
+    box.appendChild(d);
   }
+  openModal("mOnb");
+}
+
+async function submitOnb(extra){
+  $("onbErr").textContent = "";
+  const body = Object.assign({
+    provider: $("onbProv").value,
+    api_key: $("onbKey").value.trim()
+  }, extra || {});
   try{
-    const d = await api("/api/settings", {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
-    });
-    $("set").classList.remove("open");
-    S.current = null;
+    const d = await post("/api/setup", body);
+    closeModal("mOnb");
     await refresh(d.info);
-  }catch(e){
-    $("setErr").textContent = e.message;
-  }
+  }catch(e){ $("onbErr").textContent = e.message; }
 }
 
 /* ───────── 事件 ───────── */
-$("send").onclick = say;
+function syncTabs(){
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on", t.dataset.tab === S.tab));
+}
+document.querySelectorAll(".tab").forEach(t=>{
+  t.onclick = () => { S.tab = t.dataset.tab; syncTabs(); renderList(); };
+});
+$("btnNew").onclick = openNewModal;
+$("btnSet").onclick = openSettings;
+$("btnTheme").onclick = () => setTheme(S.theme === "dark" ? "light" : "dark");
+$("btnInsp").onclick = () => $("insp").classList.toggle("open");
+$("btnExport").onclick = () => { if(S.cur) window.open(`/api/conversations/${S.cur}/export`,"_blank"); };
+$("btnSend").onclick = say;
 $("btnStop").onclick = stopRun;
-$("btnSettings").onclick = openSettings;
-$("setCancel").onclick = () => $("set").classList.remove("open");
-$("setSave").onclick = saveSettings;
-$("btnExport").onclick = () => { if(S.current) window.open(`/api/rooms/${S.current}/export`,"_blank"); };
-$("btnNewRoom").onclick = async () => {
-  if(!S.current) return;
-  const name = prompt("房间名", "新房间");
-  if(!name) return;
-  const cur = await api("/api/rooms/"+S.current);
+$("ttl").onclick = renameInline;
+$("q").oninput = onSearch;
+
+$("nGo").onclick = async () => {
+  $("nErr").textContent = "";
+  if(!pickSel.size){ $("nErr").textContent = "至少选一个模型"; return; }
   try{
-    const r = await api("/api/rooms", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({name, members: cur.members})
+    const c = await post("/api/conversations", {
+      members:[...pickSel],
+      title:$("nTitle").value.trim(),
+      category:$("nCat").value.trim() || "常用"
     });
+    closeModal("mNew");
+    S.tab = "chats"; syncTabs();
     await refresh();
-    await selectRoom(r.id);
-  }catch(e){ alert("创建失败：" + e.message); }
+    await openConv(c.id);
+  }catch(e){ $("nErr").textContent = e.message; }
 };
+
+$("cGo").onclick = async () => {
+  $("cErr").textContent = "";
+  if(!$("cName").value.trim()){ $("cErr").textContent = "名字不能为空"; return; }
+  try{
+    await post("/api/contacts", {
+      name:$("cName").value.trim(),
+      provider:$("cProv").value,
+      model:$("cModel").value.trim(),
+      category:$("cCat").value.trim() || "常用",
+      role:$("cRole").value
+    });
+    closeModal("mContact");
+    await refresh();
+  }catch(e){ $("cErr").textContent = e.message; }
+};
+
+$("setGo").onclick = async () => {
+  $("setErr").textContent = "";
+  try{
+    const d = await post("/api/settings", {
+      theme: S.theme,
+      context:{
+        enabled:$("setCompress").checked,
+        keep_recent: parseInt($("setKeep").value)||8,
+        budget_tokens: parseInt($("setBudget").value)||6000
+      },
+      budget:{
+        max_rounds: parseInt($("setRounds").value)||6,
+        max_cost_usd: parseFloat($("setCost").value)||null
+      }
+    });
+    closeModal("mSet");
+    await refresh(d.info);
+  }catch(e){ $("setErr").textContent = e.message; }
+};
+
+$("thDark").onclick = () => setTheme("dark");
+$("thLight").onclick = () => setTheme("light");
 $("onbGo").onclick = () => {
   if(!$("onbKey").value.trim()){
     const found = (S.info && S.info.detected && S.info.detected.providers) || [];
-    if(found.length) return submitSetup({preset:S.tier});
+    if(found.length) return submitOnb({preset:"省钱"});
     $("onbErr").textContent = "先粘贴一个 key，或点上面「就用这个」";
     return;
   }
-  submitSetup();
+  submitOnb();
 };
-document.querySelectorAll("#onbTiers .tier").forEach(t => {
-  t.onclick = () => {
-    document.querySelectorAll("#onbTiers .tier").forEach(x=>x.classList.remove("on"));
-    t.classList.add("on"); S.tier = t.dataset.tier;
-  };
-});
-document.querySelectorAll("#setTiers .tier").forEach(t => {
-  t.onclick = () => {
-    document.querySelectorAll("#setTiers .tier").forEach(x=>x.classList.remove("on"));
-    t.classList.add("on"); S.tier = t.dataset.tier;
-  };
-});
+
 $("input").addEventListener("keydown", e => {
-  if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); say(); }
+  if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); say(); }
+});
+document.addEventListener("keydown", e => {
+  if((e.ctrlKey||e.metaKey) && e.key === "k"){ e.preventDefault(); $("q").focus(); $("q").select(); }
+  if(e.key === "Escape"){
+    document.querySelectorAll(".modal.open").forEach(m=>m.classList.remove("open"));
+    if(S.q){ $("q").value=""; S.q=""; S.hits=null; if(S.conv) renderLog(S.conv.turns); }
+  }
 });
 
 (async () => {
   try{ await refresh(); }
-  catch(e){ $("log").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+  catch(e){
+    $("log").innerHTML = '<div class="bigempty"><div class="h">加载失败</div><div>'
+      + esc(e.message) + "</div></div>";
+  }
   $("input").focus();
 })();
 </script>

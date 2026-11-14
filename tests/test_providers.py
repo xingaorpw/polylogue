@@ -261,8 +261,15 @@ class TestBuildProvider(unittest.TestCase):
 
 class TestPricing(unittest.TestCase):
     def test_known_model(self):
+        # deepseek-chat 的价格会跟着 OpenRouter 浮动，别钉死具体数字；
+        # 只断言「能查到、且是正数」。钉死数字的测试一调价就红，等于逼人改测试。
         cost = cost_of("deepseek-chat", 1_000_000, 0)
-        self.assertAlmostEqual(cost, 0.28, places=4)
+        self.assertIsNotNone(cost)
+        self.assertGreater(cost, 0)
+
+    def test_stable_price_exact(self):
+        """挑一个公开标价长期不变的来钉死，验证乘法本身没错。"""
+        self.assertAlmostEqual(cost_of("gpt-4o", 1_000_000, 0), 2.50, places=4)
 
     def test_prefix_match_for_dated_version(self):
         """grok-3-0301 这种带日期的版本要落到 grok-3。"""

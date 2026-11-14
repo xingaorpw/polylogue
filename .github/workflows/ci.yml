@@ -81,7 +81,7 @@ jobs:
 
       - name: Web 界面必须真的起得来
         run: |
-          polylogue --web --models ollama --port 8791 &
+          polylogue --web --port 8791 &
           server_pid=$!
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8791/ > /tmp/index.html; then
@@ -92,7 +92,9 @@ jobs:
 
           test -s /tmp/index.html || { echo "::error::首页没取到"; kill $server_pid; exit 1; }
           grep -q "polylogue" /tmp/index.html || { echo "::error::首页内容不对"; kill $server_pid; exit 1; }
-          grep -q "api/rooms" /tmp/index.html || { echo "::error::工作台没接上房间接口"; kill $server_pid; exit 1; }
+          grep -q "api/conversations" /tmp/index.html || { echo "::error::工作台没接上会话接口"; kill $server_pid; exit 1; }
+          grep -q 'data-theme="dark"' /tmp/index.html || { echo "::error::没有深色主题"; kill $server_pid; exit 1; }
+          grep -q 'data-theme="light"' /tmp/index.html || { echo "::error::没有浅色主题"; kill $server_pid; exit 1; }
           if grep -qE "cdn\.|unpkg|jsdelivr|googleapis" /tmp/index.html; then
             echo "::error::页面不该引外部资源，否则离线打不开"
             kill $server_pid
@@ -101,17 +103,30 @@ jobs:
 
           # 接口也要通
           curl -sf http://127.0.0.1:8791/api/info > /tmp/info.json || { echo "::error::/api/info 不通"; kill $server_pid; exit 1; }
-          curl -sf http://127.0.0.1:8791/api/rooms > /tmp/rooms.json || { echo "::error::/api/rooms 不通"; kill $server_pid; exit 1; }
+          curl -sf http://127.0.0.1:8791/api/conversations > /tmp/convs.json || { echo "::error::/api/conversations 不通"; kill $server_pid; exit 1; }
+          curl -sf http://127.0.0.1:8791/api/avatar/claude > /tmp/av.svg || { echo "::error::头像接口不通"; kill $server_pid; exit 1; }
+          curl -sf "http://127.0.0.1:8791/api/search?q=test" > /tmp/search.json || { echo "::error::搜索接口不通"; kill $server_pid; exit 1; }
+
           python - <<'PY'
           import json
           info = json.load(open('/tmp/info.json'))
-          rooms = json.load(open('/tmp/rooms.json'))
+          convs = json.load(open('/tmp/convs.json'))
+          search = json.load(open('/tmp/search.json'))
           names = {p['name'] for p in info['providers']}
           for expected in ('openai', 'claude', 'gemini', 'grok', 'deepseek', 'groq'):
               assert expected in names, f'缺少 {expected}'
-          assert rooms['rooms'], '默认房间没建出来'
-          print('接口正常，provider 齐全，默认房间存在')
+          # 通讯录要开箱就有内容，否则用户第一次打开是空的
+          assert len(info['contacts']) >= 8, f"默认通讯录只有 {len(info['contacts'])} 个"
+          assert info['categories'], '没有分类'
+          for cid in ('claude', 'gpt', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'glm'):
+              assert cid in {c['id'] for c in info['contacts']}, f'通讯录缺 {cid}'
+          assert 'conversations' in convs, '会话接口返回结构不对'
+          assert 'hits' in search, '搜索接口返回结构不对'
+          print('接口正常，通讯录 8 人齐全，会话/搜索/头像都通')
           PY
+
+          # 头像必须是 SVG，不能是空文件
+          grep -q "<svg" /tmp/av.svg || { echo "::error::头像不是 SVG"; kill $server_pid; exit 1; }
 
           kill $server_pid 2>/dev/null || true
           echo "工作台正常，且不依赖外部资源"
