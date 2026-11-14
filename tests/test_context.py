@@ -10,6 +10,7 @@ from polylogue.context import compress, estimate_tokens, summarize
 from polylogue.room import Room
 from polylogue.providers import Usage
 from polylogue.room import Turn
+from tests.support import safe_print
 
 
 def make_turns(n, speaker="a", body="这是一段比较长的发言内容，用来模拟真实的模型输出长度。"):
@@ -162,9 +163,9 @@ class TestCompressionSavesRealMoney(unittest.TestCase):
         naive = self._rounds(None)
         packed = self._rounds(8, budget_tokens=self.BUDGET)
 
-        print(f"\n  未压缩: {naive[0]} → {naive[-1]}（{self.ROUNDS} 轮）")
-        print(f"  压缩后: {packed[0]} → {packed[-1]}")
-        print(f"  压缩后峰值: {max(packed)}  预算: {self.BUDGET}")
+        safe_print(f"\n  未压缩: {naive[0]} → {naive[-1]}（{self.ROUNDS} 轮）")
+        safe_print(f"  压缩后: {packed[0]} → {packed[-1]}")
+        safe_print(f"  压缩后峰值: {max(packed)}  预算: {self.BUDGET}")
 
         # 对照组必须一路涨，否则这个测试没意义
         self.assertGreater(naive[-1], naive[1] * 8, "对照组应该持续增长")
@@ -180,7 +181,7 @@ class TestCompressionSavesRealMoney(unittest.TestCase):
         naive = self._rounds(None)
         packed = self._rounds(8, budget_tokens=self.BUDGET)
         saved = 1 - sum(packed) / sum(naive)
-        print(f"\n  {self.ROUNDS} 轮累计节省: {saved:.1%}")
+        safe_print(f"\n  {self.ROUNDS} 轮累计节省: {saved:.1%}")
         self.assertGreater(saved, 0.6, "长对话里压缩应该省掉大部分")
 
     def test_budget_is_a_hard_cap(self):
