@@ -242,13 +242,22 @@ class TestCsrf(unittest.TestCase):
         self.assertEqual(status, 200)
 
     def test_oversized_body_rejected(self):
-        status, _ = self._send(
-            "POST",
-            "/api/setup",
-            "x" * (MAX_BODY + 1024),
-            {"Content-Type": "application/json"},
-        )
-        self.assertIn(status, (400, 413, 415))
+        """只发头不发体。
+
+        发真 body 的话，服务端在读完之前就拒绝并关连接，客户端还在 sendall
+        就会 BrokenPipeError —— 那是 TCP 的正常行为，不是产品问题，
+        但会让测试在不同平台上时红时绿。
+        """
+        conn = http.client.HTTPConnection(self.live.host, timeout=30)
+        conn.putrequest("POST", "/api/setup")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(MAX_BODY + 1024))
+        conn.endheaders()
+        r = conn.getresponse()
+        status = r.status
+        r.read()
+        conn.close()
+        self.assertEqual(status, 413, "超大请求体应该在闸门就被拒绝")
 
 
 class TestFilePermissions(unittest.TestCase):

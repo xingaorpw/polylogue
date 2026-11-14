@@ -317,6 +317,11 @@ def serve(
             if ctype not in ("", "application/json") or (length > 0 and ctype != "application/json"):
                 self._json(415, {"error": "写操作必须用 Content-Type: application/json"})
                 return False
+
+            # 在闸门里就拒绝，不读 body —— 否则要先把几 MB 收进内存再说不行
+            if length > MAX_BODY:
+                self._json(413, {"error": "请求体太大"})
+                return False
             return True
 
         def _parts(self) -> tuple[list[str], dict]:
