@@ -30,6 +30,8 @@ class Session:
         on_turn: Callable[[Turn], None] | None = None,
         min_novelty: float = 0.12,
         should_stop: Callable[[], bool] | None = None,
+        keep_recent: int | None = 8,
+        context_budget: int | None = 6000,
     ):
         missing = [m for m in room.members if m not in providers]
         if missing:
@@ -42,6 +44,11 @@ class Session:
         self.on_turn = on_turn
         self.min_novelty = min_novelty
         self.should_stop = should_stop
+        # None = 不压缩（老行为）；数字 = 逐字保留最近 N 条，更早的压成摘要
+        self.keep_recent = keep_recent
+        # 上下文 token 硬上限。轮次再多，发给模型的上下文也不会超过这个数 ——
+        # 这才是「token 不随轮次爆炸」的保证，靠启发式压缩只能让它小一点。
+        self.context_budget = context_budget
         self.rounds = 0
         self.calls = 0
 
@@ -49,7 +56,9 @@ class Session:
 
     def _ask(self, name: str) -> Turn:
         provider = self.providers[name]
-        messages = self.room.context_for(name)
+        messages = self.room.context_for(
+            name, keep_recent=self.keep_recent, budget_tokens=self.context_budget
+        )
         system = self.room.system_for(name)
         try:
             reply = provider.complete(messages, system=system)

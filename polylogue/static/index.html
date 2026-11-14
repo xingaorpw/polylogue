@@ -3,178 +3,164 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>polylogue · 工作台</title>
+<title>polylogue</title>
 <style>
-  :root {
-    --bg: #0d0f13;
-    --panel: #151821;
-    --panel2: #1b1f2a;
-    --line: #262c3a;
-    --text: #e6e8ee;
-    --muted: #8892a6;
-    --accent: #6ea8fe;
-    --danger: #ff6b6b;
-    --ok: #4ade80;
-    --warn: #ffb86b;
+  :root{
+    --bg:#0b0d12; --panel:#12151d; --panel2:#181c26; --line:#232936;
+    --text:#e8eaf0; --muted:#7d8798; --dim:#5a6373;
+    --accent:#7aa2ff; --accent2:#9d7aff; --ok:#4ade80; --warn:#fbbf24; --danger:#f87171;
+    --radius:10px;
   }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
-  body {
-    background: var(--bg); color: var(--text);
-    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-    display: grid;
-    grid-template-columns: 220px 1fr 260px;
-    grid-template-rows: 48px 1fr;
-    grid-template-areas: "head head head" "side main insp";
-    overflow: hidden;
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--text);
+    font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    display:grid; grid-template-columns:212px 1fr 268px; grid-template-rows:50px 1fr;
+    grid-template-areas:"head head head" "side main insp";
+    overflow:hidden; -webkit-font-smoothing:antialiased;
   }
-  header {
-    grid-area: head;
-    display: flex; align-items: center; gap: 12px;
-    padding: 0 16px;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel);
-  }
-  header .brand { font-weight: 700; letter-spacing: .4px; }
-  header .brand span { color: var(--accent); }
-  header .roomname { color: var(--muted); font-size: 13px; }
-  header .spacer { flex: 1; }
-  button {
-    background: var(--accent); color: #07121f; border: 0; border-radius: 7px;
-    padding: 7px 13px; font: inherit; font-weight: 600; cursor: pointer;
-  }
-  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
-  button.ghost:hover { color: var(--text); border-color: var(--accent); }
-  button.danger { background: var(--danger); color: #2a0b0b; }
-  button:disabled { opacity: .4; cursor: not-allowed; }
+  button{font:inherit;cursor:pointer;border:0;border-radius:8px;padding:8px 14px;
+    background:var(--accent);color:#08101f;font-weight:600;transition:filter .15s}
+  button:hover:not(:disabled){filter:brightness(1.1)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+  button.ghost:hover:not(:disabled){color:var(--text);border-color:var(--accent)}
+  button.danger{background:var(--danger);color:#2a0a0a}
+  input,textarea,select{font:inherit;background:var(--bg);color:var(--text);
+    border:1px solid var(--line);border-radius:8px;padding:9px 11px;outline:none;width:100%}
+  input:focus,textarea:focus,select:focus{border-color:var(--accent)}
 
-  /* ---------------- 左栏 */
-  aside {
-    grid-area: side; background: var(--panel); border-right: 1px solid var(--line);
-    display: flex; flex-direction: column; min-height: 0;
-  }
-  .side-head {
-    padding: 12px; font-size: 12px; color: var(--muted);
-    text-transform: uppercase; letter-spacing: .8px;
-    display: flex; align-items: center; justify-content: space-between;
-  }
-  #rooms { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
-  .room {
-    padding: 9px 10px; border-radius: 7px; cursor: pointer;
-    display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
-    border: 1px solid transparent;
-  }
-  .room:hover { background: var(--panel2); }
-  .room.active { background: var(--panel2); border-color: var(--accent); }
-  .room .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .room .meta { font-size: 11px; color: var(--muted); }
-  .room .del {
-    opacity: 0; font-size: 15px; color: var(--muted); padding: 0 3px;
-  }
-  .room:hover .del { opacity: 1; }
-  .room .del:hover { color: var(--danger); }
+  /* ── header ── */
+  header{grid-area:head;display:flex;align-items:center;gap:12px;padding:0 16px;
+    border-bottom:1px solid var(--line);background:var(--panel)}
+  .brand{font-weight:700;letter-spacing:.3px;font-size:15px}
+  .brand i{color:var(--accent);font-style:normal}
+  .roomtitle{color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .spacer{flex:1}
+  .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
 
-  /* ---------------- 中栏 */
-  main { grid-area: main; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
-  #log { flex: 1; overflow-y: auto; padding: 18px 22px; display: flex; flex-direction: column; gap: 14px; }
-  .msg { border-left: 3px solid var(--line); padding: 2px 0 2px 12px; white-space: pre-wrap; word-break: break-word; }
-  .msg .who { font-size: 12px; font-weight: 700; letter-spacing: .3px; margin-bottom: 2px; }
-  .msg.user { border-left-color: #46506a; }
-  .msg.user .who { color: #9aa4b8; }
-  .msg.err { border-left-color: var(--danger); }
-  .msg.err .body { color: var(--danger); }
-  .msg.pending .body { color: var(--muted); font-style: italic; }
-  .mention { color: var(--accent); font-weight: 600; }
-  .empty { color: var(--muted); text-align: center; margin-top: 15vh; line-height: 2; }
-  .empty code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; }
+  /* ── 左栏 ── */
+  aside{grid-area:side;background:var(--panel);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;min-height:0}
+  .sidehead{padding:14px 14px 8px;font-size:11px;letter-spacing:.9px;text-transform:uppercase;
+    color:var(--dim);display:flex;align-items:center;justify-content:space-between}
+  #rooms{flex:1;overflow-y:auto;padding:0 8px 8px}
+  .room{padding:9px 10px;border-radius:8px;cursor:pointer;margin-bottom:3px;
+    border:1px solid transparent;display:flex;align-items:center;gap:8px}
+  .room:hover{background:var(--panel2)}
+  .room.active{background:var(--panel2);border-color:var(--accent)}
+  .room .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+  .room .n{font-size:11px;color:var(--dim)}
+  .room .x{opacity:0;color:var(--dim);font-size:15px;padding:0 2px}
+  .room:hover .x{opacity:1}
+  .room .x:hover{color:var(--danger)}
+  .sidefoot{padding:10px;border-top:1px solid var(--line);display:flex;gap:6px}
+  .sidefoot button{flex:1;font-size:12px;padding:7px 8px}
 
-  .composer { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 16px; }
-  .composer .row { display: flex; gap: 10px; align-items: flex-end; }
-  textarea {
-    flex: 1; resize: none; min-height: 44px; max-height: 170px;
-    background: var(--bg); color: var(--text); border: 1px solid var(--line);
-    border-radius: 8px; padding: 11px 12px; font: inherit; outline: none;
-  }
-  textarea:focus { border-color: var(--accent); }
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
-  .chip {
-    font-size: 11px; padding: 2px 8px; border-radius: 999px;
-    border: 1px solid var(--line); color: var(--muted); cursor: pointer; user-select: none;
-  }
-  .chip:hover { border-color: var(--accent); color: var(--text); }
+  /* ── 中栏 ── */
+  main{grid-area:main;display:flex;flex-direction:column;min-height:0;min-width:0}
+  #log{flex:1;overflow-y:auto;padding:20px 26px;display:flex;flex-direction:column;gap:16px}
+  .msg{display:flex;gap:10px;animation:in .18s ease-out}
+  @keyframes in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .av{width:26px;height:26px;border-radius:7px;flex:none;display:grid;place-items:center;
+    font-size:11px;font-weight:700;color:#0b0d12}
+  .body{min-width:0;flex:1}
+  .who{font-size:12px;font-weight:700;margin-bottom:2px}
+  .txt{white-space:pre-wrap;word-break:break-word}
+  .msg.user .txt{color:#c8cede}
+  .msg.err .txt{color:var(--danger)}
+  .msg.note{justify-content:center}
+  .msg.note .txt{font-size:12px;color:var(--dim);text-align:center}
+  .mention{color:var(--accent);font-weight:600}
+  .empty{color:var(--dim);text-align:center;margin:auto;line-height:2.1;font-size:13px}
+  .empty kbd{background:var(--panel2);border:1px solid var(--line);border-radius:5px;
+    padding:1px 6px;font-family:inherit;color:var(--accent)}
 
-  /* ---------------- 右栏 */
-  .insp {
-    grid-area: insp; background: var(--panel); border-left: 1px solid var(--line);
-    overflow-y: auto; padding: 12px; min-height: 0;
-  }
-  .insp h3 {
-    font-size: 11px; text-transform: uppercase; letter-spacing: .9px;
-    color: var(--muted); margin: 16px 0 8px; font-weight: 600;
-  }
-  .insp h3:first-child { margin-top: 0; }
-  .kv { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
-  .kv .k { color: var(--muted); }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 0; border-bottom: 1px solid var(--line); }
-  td { padding: 5px 0; border-bottom: 1px solid #1c212c; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 5px; }
-  .note { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.7; }
-  .note.warn { color: var(--warn); }
+  .composer{border-top:1px solid var(--line);background:var(--panel);padding:12px 18px 14px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px}
+  .chip{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);
+    color:var(--muted);cursor:pointer;user-select:none;transition:.15s}
+  .chip:hover{border-color:var(--accent);color:var(--text)}
+  .crow{display:flex;gap:10px;align-items:flex-end}
+  textarea{resize:none;min-height:46px;max-height:180px;padding:12px 13px}
 
-  /* ---------------- 新建房间 */
-  #modal {
-    position: fixed; inset: 0; background: rgba(0,0,0,.6);
-    display: none; align-items: center; justify-content: center; z-index: 50;
-  }
-  #modal.open { display: flex; }
-  .dialog {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-    padding: 20px; width: 440px; max-height: 80vh; overflow-y: auto;
-  }
-  .dialog h2 { margin: 0 0 14px; font-size: 15px; }
-  .dialog label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px; }
-  .dialog input[type=text], .dialog input[type=number] {
-    width: 100%; background: var(--bg); border: 1px solid var(--line); color: var(--text);
-    border-radius: 7px; padding: 8px 10px; font: inherit; outline: none;
-  }
-  .dialog input:focus { border-color: var(--accent); }
-  .pick { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 4px; }
-  .pick label {
-    display: flex; align-items: center; gap: 7px; margin: 0; padding: 7px 9px;
-    border: 1px solid var(--line); border-radius: 7px; cursor: pointer;
-    font-size: 13px; color: var(--text);
-  }
-  .pick label:hover { border-color: var(--accent); }
-  .pick label.off { opacity: .35; cursor: not-allowed; }
-  .dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
-  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  /* ── 右栏 ── */
+  .insp{grid-area:insp;background:var(--panel);border-left:1px solid var(--line);
+    overflow-y:auto;padding:14px;min-height:0}
+  .insp h3{font-size:11px;letter-spacing:.9px;text-transform:uppercase;color:var(--dim);
+    margin:18px 0 9px;font-weight:600}
+  .insp h3:first-child{margin-top:0}
+  .kv{display:flex;justify-content:space-between;padding:3px 0;font-size:13px}
+  .kv .k{color:var(--muted)}
+  .kv .v{font-variant-numeric:tabular-nums}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{text-align:left;color:var(--dim);font-weight:500;padding:5px 0;border-bottom:1px solid var(--line)}
+  td{padding:6px 0;border-bottom:1px solid #1a1e28}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  .sw{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:6px}
+  .bar{height:6px;border-radius:99px;background:var(--panel2);overflow:hidden;margin:7px 0 6px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .3s}
+  .hint{font-size:11px;color:var(--dim);line-height:1.75}
+  .hint.warn{color:var(--warn)}
+
+  /* ── 引导 ── */
+  #onb{position:fixed;inset:0;background:var(--bg);z-index:100;display:none;
+    align-items:center;justify-content:center;padding:24px}
+  #onb.open{display:flex}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    width:min(560px,100%);padding:30px;max-height:88vh;overflow-y:auto}
+  .card h1{margin:0 0 6px;font-size:20px}
+  .card .sub{color:var(--muted);font-size:13px;margin-bottom:22px;line-height:1.8}
+  .card label{display:block;font-size:12px;color:var(--muted);margin:16px 0 6px}
+  .found{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+    padding:13px 15px;margin-bottom:8px;display:flex;align-items:center;gap:11px}
+  .found .ok{color:var(--ok);font-size:16px}
+  .found .txt2{flex:1;font-size:13px}
+  .found .txt2 small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
+  .tiers{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+  .tier{border:1px solid var(--line);border-radius:10px;padding:11px;cursor:pointer;text-align:center;transition:.15s}
+  .tier:hover{border-color:var(--accent)}
+  .tier.on{border-color:var(--accent);background:var(--panel2)}
+  .tier b{display:block;font-size:13px;margin-bottom:3px}
+  .tier small{color:var(--dim);font-size:11px;line-height:1.5}
+  .card .acts{display:flex;justify-content:flex-end;gap:9px;margin-top:24px}
+  .err{color:var(--danger);font-size:12px;margin-top:10px;min-height:16px}
+
+  /* ── 设置 ── */
+  #set{position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:90;display:none;
+    align-items:center;justify-content:center;padding:24px}
+  #set.open{display:flex}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .chk{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:var(--text)}
+  .chk input{width:auto}
 </style>
 </head>
 <body>
 <header>
-  <div class="brand">poly<span>logue</span></div>
-  <div class="roomname" id="hdrRoom"></div>
+  <div class="brand">poly<i>logue</i></div>
+  <div class="roomtitle" id="hdrRoom"></div>
   <div class="spacer"></div>
+  <span class="pill" id="hdrMode"></span>
   <button class="ghost" id="btnExport">导出</button>
   <button class="danger" id="btnStop" disabled>停止</button>
 </header>
 
 <aside>
-  <div class="side-head">
-    <span>房间</span>
-    <button class="ghost" id="btnNew" style="padding:2px 8px">＋</button>
-  </div>
+  <div class="sidehead"><span>房间</span></div>
   <div id="rooms"></div>
+  <div class="sidefoot">
+    <button class="ghost" id="btnNewRoom">＋ 房间</button>
+    <button class="ghost" id="btnSettings">设置</button>
+  </div>
 </aside>
 
 <main>
   <div id="log"></div>
   <div class="composer">
     <div class="chips" id="chips"></div>
-    <div class="row">
-      <textarea id="input" placeholder="说点什么。不 @ 任何人 = 同时问所有成员；@名字 只说给某个人听。"></textarea>
+    <div class="crow">
+      <textarea id="input" placeholder="说点什么。不 @ 任何人 = 同时问所有成员；@名字 = 只说给某个人听。"></textarea>
       <button id="send">发送</button>
     </div>
   </div>
@@ -182,335 +168,491 @@
 
 <div class="insp">
   <h3>花费</h3>
-  <div class="kv"><span class="k">tokens</span><span id="stTokens">0</span></div>
-  <div class="kv"><span class="k">估算成本</span><span id="stCost">$0.0000</span></div>
-  <div class="kv"><span class="k">轮次上限</span><span id="stRounds">-</span></div>
+  <div class="kv"><span class="k">tokens</span><span class="v" id="stTokens">0</span></div>
+  <div class="kv"><span class="k">估算成本</span><span class="v" id="stCost">$0.0000</span></div>
+
+  <h3>上下文</h3>
+  <div class="bar"><i id="ctxBar" style="width:0%"></i></div>
+  <div class="kv"><span class="k" id="ctxLabel">还没开始</span><span class="v" id="ctxNum"></span></div>
+  <div class="hint" id="ctxHint"></div>
+
   <h3>每个模型</h3>
   <table>
-    <thead><tr><th>模型</th><th class="num">tokens</th><th class="num">花费</th></tr></thead>
-    <tbody id="stBody"><tr><td colspan="3" style="color:var(--muted)">还没有发言</td></tr></tbody>
+    <thead><tr><th>模型</th><th class="n">tokens</th><th class="n">花费</th></tr></thead>
+    <tbody id="stBody"><tr><td colspan="3" style="color:var(--dim)">还没有发言</td></tr></tbody>
   </table>
   <h3>说明</h3>
-  <div class="note" id="stNote"></div>
+  <div class="hint" id="stNote"></div>
 </div>
 
-<div id="modal">
-  <div class="dialog">
-    <h2>新建房间</h2>
-    <label>房间名</label>
-    <input type="text" id="mName" placeholder="比如：并发方案评审">
-    <label>成员（只列出已配置 key 的）</label>
-    <div class="pick" id="mPick"></div>
-    <div class="row2">
-      <div><label>轮次上限</label><input type="number" id="mRounds" value="6" min="1"></div>
-      <div><label>成本上限（美元，留空不限）</label><input type="number" id="mCost" step="0.01" placeholder="不限"></div>
+<!-- 首次引导 -->
+<div id="onb">
+  <div class="card">
+    <h1>先接上一个模型</h1>
+    <div class="sub">
+      填一次就够，之后不用再管。key 只存在你本机的
+      <code>~/.polylogue/config.json</code>，不会上传到任何地方。
     </div>
-    <div class="actions">
-      <button class="ghost" id="mCancel">取消</button>
-      <button id="mCreate">创建</button>
+    <div id="onbFound"></div>
+    <label>API key</label>
+    <div class="row2">
+      <select id="onbProvider">
+        <option value="openrouter">OpenRouter（一个 key 调所有厂商）</option>
+        <option value="openai">OpenAI</option>
+        <option value="claude">Claude（Anthropic）</option>
+        <option value="gemini">Gemini（Google）</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="grok">Grok（xAI）</option>
+      </select>
+      <input id="onbKey" type="password" placeholder="粘贴 key" autocomplete="off">
+    </div>
+    <label>模型档位</label>
+    <div class="tiers" id="onbTiers">
+      <div class="tier on" data-tier="省钱"><b>省钱</b><small>日常够用<br>约 ¥0.01/轮</small></div>
+      <div class="tier" data-tier="强力"><b>强力</b><small>claude+GPT+Gemini<br>质量最好</small></div>
+      <div class="tier" data-tier="免费"><b>免费</b><small>不花钱<br>可能限流</small></div>
+    </div>
+    <div class="err" id="onbErr"></div>
+    <div class="acts">
+      <button id="onbGo">开始</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div id="set">
+  <div class="card">
+    <h1>设置</h1>
+    <div class="sub" style="margin-bottom:8px">改了立即生效，存在本地。</div>
+    <label>模型档位（会重建房间，清空当前转录）</label>
+    <div class="tiers" id="setTiers">
+      <div class="tier" data-tier="省钱"><b>省钱</b><small>日常够用</small></div>
+      <div class="tier" data-tier="强力"><b>强力</b><small>质量最好</small></div>
+      <div class="tier" data-tier="免费"><b>免费</b><small>可能限流</small></div>
+    </div>
+    <label>上下文压缩</label>
+    <div class="chk"><input type="checkbox" id="setCompress" checked><span>开启（推荐，长对话省钱）</span></div>
+    <div class="row2" style="margin-top:10px">
+      <div>
+        <label style="margin-top:0">逐字保留最近几条</label>
+        <input type="number" id="setKeep" min="2" max="40" value="8">
+      </div>
+      <div>
+        <label style="margin-top:0">上下文上限（token）</label>
+        <input type="number" id="setBudget" min="500" step="500" value="6000">
+      </div>
+    </div>
+    <div class="row2" style="margin-top:10px">
+      <div>
+        <label style="margin-top:0">单轮上限</label>
+        <input type="number" id="setRounds" min="1" value="6">
+      </div>
+      <div>
+        <label style="margin-top:0">成本上限（美元）</label>
+        <input type="number" id="setCost" step="0.1" value="0.5">
+      </div>
+    </div>
+    <div class="err" id="setErr"></div>
+    <div class="acts">
+      <button class="ghost" id="setCancel">取消</button>
+      <button id="setSave">保存</button>
     </div>
   </div>
 </div>
 
 <script>
-const $ = id => document.getElementById(id);
-let state = { providers: [], rooms: [], current: null, running: false, priceTable: '' };
+const $ = i => document.getElementById(i);
+const S = { info:null, rooms:[], current:null, running:false, tier:"省钱" };
 
-function hue(n) { let h = 0; for (const c of n) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
-function colorFor(n) { return `hsl(${hue(n)}, 62%, 68%)`; }
-function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function fmt(n) { return n === null || n === undefined ? '?' : n.toLocaleString(); }
-function money(c) { return c === null || c === undefined ? '未知' : '$' + c.toFixed(4); }
+const hue = n => { let h=0; for (const c of n) h=(h*31+c.charCodeAt(0))%360; return h; };
+const colorFor = n => n==="user" ? "#8b94a8" : n==="system" ? "#f87171" : `hsl(${hue(n)},64%,68%)`;
+const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = n => (n==null? "?": n.toLocaleString());
+const money = c => c==null? "未知" : "$"+c.toFixed(4);
+const initial = n => (n||"?").slice(0,1).toUpperCase();
 
-async function api(path, opts) {
-  const res = await fetch(path, opts);
-  const ct = res.headers.get('Content-Type') || '';
-  const data = ct.includes('json') ? await res.json() : await res.text();
-  if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
-  return data;
+async function api(path, opt){
+  const r = await fetch(path, opt);
+  const ct = r.headers.get("Content-Type")||"";
+  const d = ct.includes("json") ? await r.json() : await r.text();
+  if(!r.ok) throw new Error((d&&d.error)||("HTTP "+r.status));
+  return d;
 }
 
-/* ---------------- 房间列表 */
-async function loadRooms() {
-  const data = await api('/api/rooms');
-  state.rooms = data.rooms;
-  const box = $('rooms');
-  box.innerHTML = '';
-  for (const r of state.rooms) {
-    const el = document.createElement('div');
-    el.className = 'room' + (r.id === state.current ? ' active' : '');
+/* ───────── 引导 ───────── */
+function showOnboarding(info){
+  const found = (info.detected && info.detected.providers) || [];
+  const box = $("onbFound");
+  box.innerHTML = "";
+  if(found.length){
+    for(const p of found){
+      const d = document.createElement("div");
+      d.className = "found";
+      d.innerHTML = `<span class="ok">✓</span>
+        <div class="txt2">检测到 <b>${esc(p.name)}</b> 的 key
+          <small>${esc(p.masked)} · ${esc(p.source||"本机")}</small></div>`;
+      const b = document.createElement("button");
+      b.textContent = "就用这个";
+      b.onclick = () => submitSetup({ preset: S.tier });
+      d.appendChild(b);
+      box.appendChild(d);
+    }
+  }
+  $("onb").classList.add("open");
+}
+
+async function submitSetup(extra){
+  $("onbErr").textContent = "";
+  const body = Object.assign({
+    provider: $("onbProvider").value,
+    api_key: $("onbKey").value.trim(),
+    preset: S.tier,
+  }, extra||{});
+  try{
+    const d = await api("/api/setup", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
+    });
+    $("onb").classList.remove("open");
+    S.info = d.info;
+    await refresh(d.info);
+  }catch(e){
+    $("onbErr").textContent = e.message;
+  }
+}
+
+/* ───────── 房间 ───────── */
+async function refresh(info){
+  if(info) S.info = info;
+  else S.info = await api("/api/info");
+
+  const i = S.info;
+  $("hdrMode").textContent = i.origin || "";
+  $("stNote").innerHTML = `价格表 ${esc(i.price_table)}，估算值，以各家官网为准。`
+    + (i.skipped && i.skipped.length
+        ? `<br><span style="color:var(--warn)">跳过：${i.skipped.map(esc).join("；")}</span>` : "");
+
+  if(i.onboarding){ showOnboarding(i); return; }
+
+  S.rooms = i.rooms || [];
+  renderRooms();
+  if(!S.current || !S.rooms.some(r=>r.id===S.current)){
+    if(i.default_room) await selectRoom(i.default_room);
+    else if(S.rooms.length) await selectRoom(S.rooms[0].id);
+  }
+}
+
+function renderRooms(){
+  const box = $("rooms");
+  box.innerHTML = "";
+  if(!S.rooms.length){
+    box.innerHTML = '<div class="hint" style="padding:10px">还没有房间</div>';
+    return;
+  }
+  for(const r of S.rooms){
+    const el = document.createElement("div");
+    el.className = "room" + (r.id===S.current ? " active":"");
     el.innerHTML = `<div class="nm">${esc(r.name)}</div>
-      <div class="meta">${r.turns} 条</div>
-      <span class="del" title="删除">×</span>`;
+      <div class="n">${r.turns}</div><span class="x" title="删除">×</span>`;
     el.onclick = e => {
-      if (e.target.classList.contains('del')) { delRoom(r.id); return; }
+      if(e.target.classList.contains("x")){ delRoom(r.id); return; }
       selectRoom(r.id);
     };
     box.appendChild(el);
   }
 }
 
-async function delRoom(id) {
-  if (!confirm('删除这个房间？转录会一起没掉。')) return;
-  await api('/api/rooms/' + id, { method: 'DELETE' });
-  if (state.current === id) {
-    state.current = null;
-    $('log').innerHTML = '';
-    $('hdrRoom').textContent = '';
-  }
-  await loadRooms();
-  if (!state.current && state.rooms.length) selectRoom(state.rooms[0].id);
+async function delRoom(id){
+  if(!confirm("删除这个房间？转录会一起没掉。")) return;
+  await api("/api/rooms/"+id, {method:"DELETE"});
+  if(S.current===id) S.current = null;
+  await refresh();
 }
 
-async function selectRoom(id) {
-  state.current = id;
-  const data = await api('/api/rooms/' + id);
-  $('hdrRoom').textContent = data.name + ' · ' + data.members.join(' / ');
-  renderChips(data.members);
-  renderLog(data.turns);
-  updateStats({
-    total_tokens: data.tokens, total_cost: data.cost, cost_unknown: data.cost_unknown,
-    by_model: null, budget: data.budget,
+async function selectRoom(id){
+  S.current = id;
+  const d = await api("/api/rooms/"+id);
+  $("hdrRoom").textContent = d.name + " · " + d.members.join(" / ");
+  renderChips(d.members);
+  renderLog(d.turns);
+  paint({
+    tokens: d.tokens, cost: d.cost, unknown: d.cost_unknown,
+    by_model: null, compression: d.compression
   });
-  await loadRooms();
+  renderRooms();
 }
 
-/* ---------------- 对话渲染 */
-function renderChips(members) {
-  const box = $('chips');
-  box.innerHTML = '';
-  for (const m of members) {
-    const c = document.createElement('span');
-    c.className = 'chip';
-    c.textContent = '@' + m;
-    c.style.color = colorFor(m);
+/* ───────── 对话 ───────── */
+function renderChips(members){
+  const box = $("chips"); box.innerHTML = "";
+  for(const m of members){
+    const c = document.createElement("span");
+    c.className = "chip"; c.textContent = "@"+m; c.style.color = colorFor(m);
     c.onclick = () => {
-      const inp = $('input');
-      inp.value = (inp.value.replace(/\s*$/, '') + ' @' + m + ' ').trimStart();
-      inp.focus();
+      const t = $("input");
+      t.value = (t.value.replace(/\s*$/,"") + " @" + m + " ").trimStart();
+      t.focus();
     };
     box.appendChild(c);
   }
 }
 
-function msgEl(who, text, cls = '') {
-  const el = document.createElement('div');
-  el.className = 'msg ' + cls;
-  if (who) {
-    const w = document.createElement('div');
-    w.className = 'who';
-    w.textContent = who;
-    w.style.color = who === 'user' ? '#9aa4b8' : colorFor(who);
-    el.appendChild(w);
-  }
-  const b = document.createElement('div');
-  b.className = 'body';
-  b.innerHTML = esc(text).replace(/@([A-Za-z0-9_-]+)/g, '<span class="mention">@$1</span>');
-  el.appendChild(b);
+function msgEl(speaker, text, cls){
+  const el = document.createElement("div");
+  el.className = "msg " + (cls||"");
+  const av = document.createElement("div");
+  av.className = "av";
+  av.style.background = colorFor(speaker);
+  av.textContent = initial(speaker);
+  const body = document.createElement("div");
+  body.className = "body";
+  const who = document.createElement("div");
+  who.className = "who"; who.textContent = speaker; who.style.color = colorFor(speaker);
+  const txt = document.createElement("div");
+  txt.className = "txt";
+  txt.innerHTML = esc(text).replace(/@([A-Za-z0-9_-]+)/g,'<span class="mention">@$1</span>');
+  body.appendChild(who); body.appendChild(txt);
+  el.appendChild(av); el.appendChild(body);
   return el;
 }
 
-function renderLog(turns) {
-  const log = $('log');
-  log.innerHTML = '';
-  if (!turns || !turns.length) {
-    log.innerHTML = `<div class="empty">这个房间还没有对话。<br>
-      不 <code>@</code> 任何人 = 同时问所有成员；<br>
-      <code>@名字</code> = 只说给某个人听。</div>`;
+function renderLog(turns){
+  const log = $("log"); log.innerHTML = "";
+  if(!turns || !turns.length){
+    log.innerHTML = `<div class="empty">还没有对话<br>
+      不 <kbd>@</kbd> 任何人 = 同时问所有成员<br>
+      <kbd>@名字</kbd> = 只说给某个人听</div>`;
     return;
   }
-  for (const t of turns) {
-    log.appendChild(msgEl(t.speaker, t.error ? t.error : t.content, t.error ? 'err' : (t.role === 'user' ? 'user' : '')));
+  for(const t of turns){
+    if(t.role==="user" && t.speaker==="user") log.appendChild(msgEl("你", t.content, "user"));
+    else if(t.error) log.appendChild(msgEl(t.speaker, t.error, "err"));
+    else log.appendChild(msgEl(t.speaker, t.content));
   }
   log.scrollTop = log.scrollHeight;
 }
 
-function appendMsg(who, text, cls) {
-  const log = $('log');
-  const empty = log.querySelector('.empty');
-  if (empty) empty.remove();
-  const el = msgEl(who, text, cls);
-  log.appendChild(el);
+function append(speaker, text, cls){
+  const log = $("log");
+  const e = log.querySelector(".empty"); if(e) e.remove();
+  log.appendChild(msgEl(speaker, text, cls));
   log.scrollTop = log.scrollHeight;
-  return el;
 }
 
-/* ---------------- 统计 */
-function updateStats(s) {
-  $('stTokens').textContent = fmt(s.total_tokens);
-  $('stCost').textContent = money(s.total_cost) + (s.cost_unknown ? '+' : '');
-  if (s.budget) $('stRounds').textContent = s.budget.max_rounds;
-  if (s.by_model) renderStatsTable(s.by_model);
-  $('stNote').innerHTML = `价格表 ${esc(state.priceTable)}，是估算值，以各家官网为准。`
-    + (s.cost_unknown ? '<br><span style="color:var(--warn)">有模型查不到价格，真实花费更高。</span>' : '');
+/* ───────── 统计 ───────── */
+function paint(d){
+  $("stTokens").textContent = fmt(d.tokens);
+  $("stCost").textContent = money(d.cost) + (d.unknown ? "+" : "");
+  if(d.by_model) renderStats(d.by_model);
+  paintCompression(d.compression);
 }
 
-function renderStatsTable(rows) {
-  const body = $('stBody');
-  if (!rows || !rows.length) {
-    body.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">还没有发言</td></tr>';
+function paintCompression(c){
+  const bar = $("ctxBar"), label = $("ctxLabel"), num = $("ctxNum"), hint = $("ctxHint");
+  if(!c || (!c.compressed && !c.raw_tokens)){
+    bar.style.width = "0%"; label.textContent = "还没开始"; num.textContent = ""; hint.textContent = "";
     return;
   }
-  body.innerHTML = rows.map(r => `<tr>
-      <td><span class="swatch" style="background:${colorFor(r.speaker)}"></span>${esc(r.speaker)}</td>
-      <td class="num">${fmt(r.tokens)}</td>
-      <td class="num">${r.unknown ? '未知' : money(r.cost)}</td>
-    </tr>`).join('');
+  if(c.skipped){
+    bar.style.width = "4%"; label.textContent = "无需压缩";
+    num.textContent = "";
+    hint.textContent = "发言还短，压缩反而更大，已自动跳过。";
+    return;
+  }
+  if(!c.compressed){
+    bar.style.width = "6%"; label.textContent = "未触发"; num.textContent = "";
+    hint.textContent = "还没到保留条数，全部逐字发送。";
+    return;
+  }
+  const raw = c.raw_tokens || 1, dig = c.digest_tokens || 0;
+  const saved = Math.max(0, 1 - dig / raw);
+  bar.style.width = Math.min(100, Math.max(8, (1-saved)*100)) + "%";
+  label.textContent = `较早的 ${c.older_turns} 条已压缩`;
+  num.textContent = `${fmt(dig)} / ${fmt(raw)}`;
+  hint.innerHTML = `省下 <b style="color:var(--ok)">${(saved*100).toFixed(0)}%</b> 的早期上下文`
+    + (c.dropped ? `<br><span style="color:var(--warn)">超预算，另外省略了 ${c.dropped} 条</span>` : "");
 }
 
-/* ---------------- 发言 */
-async function say() {
-  const text = $('input').value.trim();
-  if (!text || state.running || !state.current) return;
-  $('input').value = '';
-  appendMsg('user', text, 'user');
+function renderStats(rows){
+  const b = $("stBody");
+  if(!rows || !rows.length){
+    b.innerHTML = '<tr><td colspan="3" style="color:var(--dim)">还没有发言</td></tr>';
+    return;
+  }
+  b.innerHTML = rows.map(r => `<tr>
+    <td><span class="sw" style="background:${colorFor(r.speaker)}"></span>${esc(r.speaker)}</td>
+    <td class="n">${fmt(r.tokens)}</td>
+    <td class="n">${r.unknown? "未知" : money(r.cost)}</td></tr>`).join("");
+}
+
+/* ───────── 发言 ───────── */
+async function say(){
+  const t = $("input").value.trim();
+  if(!t || S.running || !S.current) return;
+  $("input").value = "";
+  append("你", t, "user");
   setRunning(true);
-  const pending = appendMsg('…', '等待回应', 'pending');
+  let pending = msgEl("…", "等待回应", "note");
+  $("log").appendChild(pending);
 
-  try {
-    const res = await fetch(`/api/rooms/${state.current}/say`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+  try{
+    const r = await fetch(`/api/rooms/${S.current}/say`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({text:t})
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || ('HTTP ' + res.status));
+    if(!r.ok){
+      const e = await r.json().catch(()=>({}));
+      throw new Error(e.error || ("HTTP "+r.status));
     }
+    const rd = r.body.getReader(), dec = new TextDecoder();
+    let buf = "", first = true;
 
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '', first = true;
+    while(true){
+      const {value, done} = await rd.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      let k;
+      while((k = buf.indexOf("\n\n")) >= 0){
+        const chunk = buf.slice(0,k); buf = buf.slice(k+2);
+        if(!chunk.startsWith("data: ")) continue;
+        let ev; try{ ev = JSON.parse(chunk.slice(6)); }catch{ continue; }
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf('\n\n')) >= 0) {
-        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
-        if (!chunk.startsWith('data: ')) continue;
-        let ev; try { ev = JSON.parse(chunk.slice(6)); } catch { continue; }
-
-        if (ev.type === 'turn' || ev.type === 'error') {
-          if (first) { pending.remove(); first = false; }
-        }
-        if (ev.type === 'turn') appendMsg(ev.speaker, ev.content);
-        else if (ev.type === 'error') appendMsg(ev.speaker, ev.message, 'err');
-        else if (ev.type === 'done') {
-          if (first) { pending.remove(); first = false; }
-          updateStats({
-            total_tokens: ev.tokens, total_cost: ev.cost,
-            cost_unknown: ev.cost_unknown, by_model: ev.stats, budget: null,
-          });
-          if (ev.stop) {
-            const n = document.createElement('div');
-            n.className = 'note';
-            n.style.marginTop = '6px';
-            n.textContent = '— ' + ev.stop;
-            $('log').appendChild(n);
-            $('log').scrollTop = $('log').scrollHeight;
+        if((ev.type==="turn"||ev.type==="error") && first){ pending.remove(); first = false; }
+        if(ev.type==="turn") append(ev.speaker, ev.content);
+        else if(ev.type==="error") append(ev.speaker, ev.message, "err");
+        else if(ev.type==="done"){
+          if(first){ pending.remove(); first = false; }
+          paint({tokens:ev.tokens, cost:ev.cost, unknown:ev.cost_unknown,
+                 by_model:ev.stats, compression:ev.compression});
+          if(ev.stop){
+            const n = document.createElement("div");
+            n.className = "msg note";
+            const b2 = document.createElement("div");
+            b2.className = "txt"; b2.textContent = "— " + ev.stop;
+            n.appendChild(b2);
+            $("log").appendChild(n);
+            $("log").scrollTop = $("log").scrollHeight;
           }
         }
       }
     }
-  } catch (err) {
+  }catch(e){
     pending.remove();
-    appendMsg('system', '请求失败：' + err.message, 'err');
-  } finally {
+    append("system", "请求失败：" + e.message, "err");
+  }finally{
     setRunning(false);
-    $('input').focus();
-    loadRooms();
+    $("input").focus();
+    refresh();
   }
 }
 
-function setRunning(on) {
-  state.running = on;
-  $('send').disabled = on;
-  $('send').textContent = on ? '会商中…' : '发送';
-  $('btnStop').disabled = !on;
-  if (!on) $('btnStop').textContent = '停止';
+function setRunning(on){
+  S.running = on;
+  $("send").disabled = on;
+  $("send").textContent = on ? "会商中…" : "发送";
+  $("btnStop").disabled = !on;
+  if(!on) $("btnStop").textContent = "停止";
 }
 
-async function stopRun() {
-  if (!state.current) return;
-  $('btnStop').disabled = true;
-  $('btnStop').textContent = '停止中…';
-  await api(`/api/rooms/${state.current}/stop`, { method: 'POST' });
+async function stopRun(){
+  if(!S.current) return;
+  $("btnStop").disabled = true;
+  $("btnStop").textContent = "停止中…";
+  await api(`/api/rooms/${S.current}/stop`, {method:"POST"});
 }
 
-/* ---------------- 新建房间 */
-async function openModal() {
-  const data = await api('/api/info');
-  state.providers = data.providers;
-  state.priceTable = data.price_table;
-  const pick = $('mPick');
-  pick.innerHTML = '';
-  for (const p of state.providers) {
-    const l = document.createElement('label');
-    if (!p.available) l.className = 'off';
-    l.innerHTML = `<input type="checkbox" value="${esc(p.name)}" ${p.available ? '' : 'disabled'}>
-      ${esc(p.name)}<span style="color:var(--muted);font-size:11px">${esc(p.model)}</span>`;
-    if (!p.available && p.env) l.title = '需要设置 ' + p.env;
-    pick.appendChild(l);
+/* ───────── 设置 ───────── */
+function openSettings(){
+  const c = (S.info && S.info.context) || {};
+  $("setCompress").checked = c.enabled !== false;
+  $("setKeep").value = c.keep_recent || 8;
+  $("setBudget").value = c.budget_tokens || 6000;
+  const r = S.rooms.find(x=>x.id===S.current);
+  if(r && r.budget){
+    $("setRounds").value = r.budget.max_rounds || 6;
+    $("setCost").value = r.budget.max_cost_usd ?? 0.5;
   }
-  $('modal').classList.add('open');
+  $("set").classList.add("open");
 }
 
-async function createRoom() {
-  const picked = [...document.querySelectorAll('#mPick input:checked')].map(i => i.value);
-  if (!picked.length) { alert('至少选一个模型'); return; }
-  const cost = $('mCost').value.trim();
-  try {
-    const room = await api('/api/rooms', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: $('mName').value.trim() || '未命名房间',
-        members: picked,
-        max_rounds: parseInt($('mRounds').value) || 6,
-        max_cost_usd: cost ? parseFloat(cost) : null,
-      }),
+async function saveSettings(){
+  $("setErr").textContent = "";
+  const body = {
+    context: {
+      enabled: $("setCompress").checked,
+      keep_recent: parseInt($("setKeep").value) || 8,
+      budget_tokens: parseInt($("setBudget").value) || 6000,
+    },
+    budget: {
+      max_rounds: parseInt($("setRounds").value) || 6,
+      max_cost_usd: parseFloat($("setCost").value) || null,
+    },
+  };
+  if(S.tier !== (S.info && S.info.context && S.info.context._tier)){
+    const rows = (S.info.presets || {})[S.tier];
+    if(rows) body.members = rows;
+  }
+  try{
+    const d = await api("/api/settings", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
     });
-    $('modal').classList.remove('open');
-    $('mName').value = '';
-    await loadRooms();
-    await selectRoom(room.id);
-  } catch (err) {
-    alert('创建失败：' + err.message);
+    $("set").classList.remove("open");
+    S.current = null;
+    await refresh(d.info);
+  }catch(e){
+    $("setErr").textContent = e.message;
   }
 }
 
-/* ---------------- 事件绑定 */
-$('send').onclick = say;
-$('btnStop').onclick = stopRun;
-$('btnNew').onclick = openModal;
-$('mCancel').onclick = () => $('modal').classList.remove('open');
-$('mCreate').onclick = createRoom;
-$('btnExport').onclick = () => {
-  if (state.current) window.open(`/api/rooms/${state.current}/export`, '_blank');
+/* ───────── 事件 ───────── */
+$("send").onclick = say;
+$("btnStop").onclick = stopRun;
+$("btnSettings").onclick = openSettings;
+$("setCancel").onclick = () => $("set").classList.remove("open");
+$("setSave").onclick = saveSettings;
+$("btnExport").onclick = () => { if(S.current) window.open(`/api/rooms/${S.current}/export`,"_blank"); };
+$("btnNewRoom").onclick = async () => {
+  if(!S.current) return;
+  const name = prompt("房间名", "新房间");
+  if(!name) return;
+  const cur = await api("/api/rooms/"+S.current);
+  try{
+    const r = await api("/api/rooms", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({name, members: cur.members})
+    });
+    await refresh();
+    await selectRoom(r.id);
+  }catch(e){ alert("创建失败：" + e.message); }
 };
-$('input').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); say(); }
+$("onbGo").onclick = () => {
+  if(!$("onbKey").value.trim()){
+    const found = (S.info && S.info.detected && S.info.detected.providers) || [];
+    if(found.length) return submitSetup({preset:S.tier});
+    $("onbErr").textContent = "先粘贴一个 key，或点上面「就用这个」";
+    return;
+  }
+  submitSetup();
+};
+document.querySelectorAll("#onbTiers .tier").forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll("#onbTiers .tier").forEach(x=>x.classList.remove("on"));
+    t.classList.add("on"); S.tier = t.dataset.tier;
+  };
 });
-$('modal').addEventListener('click', e => {
-  if (e.target.id === 'modal') $('modal').classList.remove('open');
+document.querySelectorAll("#setTiers .tier").forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll("#setTiers .tier").forEach(x=>x.classList.remove("on"));
+    t.classList.add("on"); S.tier = t.dataset.tier;
+  };
+});
+$("input").addEventListener("keydown", e => {
+  if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); say(); }
 });
 
-/* ---------------- 启动 */
 (async () => {
-  try {
-    const info = await api('/api/info');
-    state.priceTable = info.price_table;
-    state.providers = info.providers;
-    await loadRooms();
-    if (state.rooms.length) await selectRoom(info.default_room || state.rooms[0].id);
-    if (info.skipped && info.skipped.length) {
-      $('stNote').innerHTML = '<span style="color:var(--warn)">启动时跳过的成员：</span><br>'
-        + info.skipped.map(esc).join('<br>');
-    }
-  } catch (err) {
-    $('log').innerHTML = `<div class="empty">加载失败：${esc(err.message)}</div>`;
-  }
-  $('input').focus();
+  try{ await refresh(); }
+  catch(e){ $("log").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+  $("input").focus();
 })();
 </script>
 </body>

@@ -23,10 +23,8 @@ ROLE_PRESETS = {
 
 
 def _parse_models(spec: str) -> list[str]:
-    names = [p.strip() for p in spec.split(",") if p.strip()]
-    if not names:
-        raise SystemExit("--models 不能为空")
-    return names
+    """空字符串 = 没指定，交给自动检测决定成员（不是错误）。"""
+    return [p.strip() for p in (spec or "").split(",") if p.strip()]
 
 
 def _parse_roles(spec: str | None, members: list[str]) -> dict[str, str]:
@@ -100,7 +98,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("prompt", nargs="?", help="要问的话；不给就进交互模式")
     p.add_argument("--version", action="version", version=f"polylogue {__version__}")
-    p.add_argument("--models", default="gemini,grok,deepseek", help="房间成员，逗号分隔")
+    p.add_argument(
+        "--models",
+        default="",
+        help="房间成员，逗号分隔。不填就自动检测本机凭据 / 用上次保存的配置",
+    )
     p.add_argument("--model", action="append", default=[], metavar="NAME=MODEL", help="覆盖某个成员的模型名")
     p.add_argument("--provider", action="append", default=[], metavar="NAME=URL", help="自定义 OpenAI 兼容端点")
     p.add_argument("--roles", help="角色分配：gemini=critic,grok=builder，或 critic,builder")
@@ -110,6 +112,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sequential", action="store_true", help="同一轮按顺序问（默认并行）")
     p.add_argument("--quiet", action="store_true", help="不打印每个模型的名字前缀")
     p.add_argument("--web", action="store_true", help="启动本地 Web 界面")
+    p.add_argument(
+        "--app",
+        action="store_true",
+        help="像桌面程序一样打开：起服务 + 开一个独立窗口（推荐）",
+    )
     p.add_argument("--port", type=int, default=8765, help="Web 界面端口，默认 8765")
     p.add_argument("--list-providers", action="store_true", help="列出支持的 provider 后退出")
     args = p.parse_args(argv)
@@ -135,11 +142,21 @@ def main(argv: list[str] | None = None) -> int:
 
     roles = _parse_roles(args.roles, members)
 
+    if args.app:
+        from .launcher import run_app
+
+        return run_app(
+            members or None,
+            port=args.port,
+            custom=_parse_custom(args.provider),
+            models=models,
+        )
+
     if args.web:
         from .web import serve
 
         return serve(
-            members,
+            members or None,
             port=args.port,
             budget=Budget(
                 max_rounds=args.max_rounds,
@@ -152,6 +169,18 @@ def main(argv: list[str] | None = None) -> int:
             custom=_parse_custom(args.provider),
             models=models,
         )
+
+    # 命令行的单次/交互模式必须有明确成员，否则不知道该找谁说话
+    if not members:
+        from .bootstrap import resolve_members
+
+        rows, _origin = resolve_members(None)
+        members = [r["name"] for r in rows]
+        if not members:
+            raise SystemExit(
+                "没有可用模型。先跑一次 `polylogue --app` 在界面里填 key，"
+                "或用 --models 指定成员。"
+            )
 
     providers = _build_providers(members, models, args.provider)
     room = Room(members, roles=roles)

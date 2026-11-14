@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -70,6 +71,39 @@ class ProviderError(RuntimeError):
     """调用失败。带上 provider 名字，方便定位是哪家的问题。"""
 
 
+def _explain(name: str, code: int, detail: str) -> str:
+    """把 HTTP 错误码翻成人话。
+
+    用户不该看到 `HTTP 402: {"error":{"message":"This request requires more
+    credits, or fewer max_tokens..."}}` —— 他看不出这跟自己有没有关系、
+    该改什么。下面每一条都直接告诉他下一步做什么。
+    """
+    low = detail.lower()
+    if code == 401 or "invalid api key" in low or "no auth" in low:
+        return f"{name} 的 API key 无效或已过期。在设置里换一个。"
+    if code == 402 or "requires more credits" in low or "insufficient" in low:
+        # OpenRouter 的 402 会带上「你要 X 但只买得起 Y」
+        match = re.search(r"requested up to (\d+) tokens, but can only afford (\d+)", detail)
+        if match:
+            return (
+                f"{name} 余额不够：这次请求按 {match.group(1)} tokens 预留，"
+                f"账户只够 {match.group(2)}。"
+                f"把 max_tokens 调到 {match.group(2)} 以下，或换「省钱」档 / 充值。"
+            )
+        return f"{name} 余额不够，充值或换更便宜的档位。"
+    if code == 404:
+        if "no longer available" in low or "no provider serves" in low:
+            return f"{name} 用的模型已经下线了。在设置里换一个档位，或改成别的 model id。"
+        return f"{name} 找不到这个模型，检查 model 名字。"
+    if code == 429 or "rate limit" in low:
+        return f"{name} 被限流了（免费模型常见）。等几十秒再发，或换付费档位。"
+    if code == 403:
+        return f"{name} 拒绝访问（403）：{detail[:160]}"
+    if code >= 500:
+        return f"{name} 服务端出错（{code}），过一会儿再试。"
+    return f"{name} HTTP {code}: {detail[:200]}"
+
+
 class Provider:
     """适配器基类。"""
 
@@ -91,7 +125,7 @@ class Provider:
                 detail = exc.read().decode("utf-8", "replace")[:400]
             except Exception:  # noqa: BLE001 - 读错误体失败不该掩盖原始错误
                 pass
-            raise ProviderError(f"{self.name} HTTP {exc.code}: {detail}") from exc
+            raise ProviderError(_explain(self.name, exc.code, detail)) from exc
         except URLError as exc:
             raise ProviderError(f"{self.name} 连不上：{exc.reason}") from exc
         except (TimeoutError, OSError) as exc:
@@ -103,12 +137,24 @@ class Provider:
 class OpenAICompatProvider(Provider):
     """OpenAI 兼容接口。DeepSeek / Grok / OpenRouter / Ollama 都走这里。"""
 
-    def __init__(self, name: str, base_url: str, api_key: str, model: str, timeout: float = 120.0):
+    def __init__(
+        self,
+        name: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = 120.0,
+        max_tokens: int = 1024,
+    ):
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        # 一定要带 max_tokens。不带的话 OpenRouter 会按模型上限（可能 65535）
+        # 预留额度，低余额账户直接 402 报错——「用不起」不是因为真的贵，
+        # 是因为它替你估了一个你付不起的数。
+        self.max_tokens = max_tokens
 
     def complete(self, messages: list[Message], system: str | None = None) -> Reply:
         payload_messages: list[dict[str, str]] = []
@@ -117,6 +163,8 @@ class OpenAICompatProvider(Provider):
         payload_messages.extend(m.as_dict() for m in messages)
 
         payload = {"model": self.model, "messages": payload_messages}
+        if self.max_tokens:
+            payload["max_tokens"] = self.max_tokens
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
@@ -127,7 +175,9 @@ class OpenAICompatProvider(Provider):
         latency = time.monotonic() - started
 
         try:
-            text = data["choices"][0]["message"]["content"] or ""
+            choice = data["choices"][0]
+            message = choice.get("message") or {}
+            text = message.get("content") or ""
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError(f"{self.name} 返回结构不对：{str(data)[:300]}") from exc
 
@@ -136,7 +186,23 @@ class OpenAICompatProvider(Provider):
             prompt_tokens=int(raw_usage.get("prompt_tokens") or 0),
             completion_tokens=int(raw_usage.get("completion_tokens") or 0),
         )
-        return Reply(text=text.strip(), model=self.model, usage=usage, latency_s=latency)
+
+        text = text.strip()
+        if not text:
+            # 推理模型可能把预算全花在思考上，正文是空的。
+            # 这时不能返回空字符串 —— 界面上会出现一个空气泡，用户不知道发生了什么。
+            details = raw_usage.get("completion_tokens_details") or {}
+            reasoning = int(details.get("reasoning_tokens") or 0)
+            if message.get("reasoning") or reasoning:
+                raise ProviderError(
+                    f"{self.name} 只输出了思考过程，没有给出正文"
+                    f"（思考 {reasoning or '?'} tokens，上限 {self.max_tokens}）。"
+                    "把 max_tokens 调大，或换一个非推理模型。"
+                )
+            finish = choice.get("finish_reason")
+            raise ProviderError(f"{self.name} 返回了空内容（finish_reason={finish}）")
+
+        return Reply(text=text, model=self.model, usage=usage, latency_s=latency)
 
 
 class GeminiProvider(Provider):
@@ -430,4 +496,5 @@ def build_provider(
         base_url=base_url or preset["base_url"],
         api_key=token or "none",
         model=resolved_model,
+        max_tokens=max_tokens,
     )

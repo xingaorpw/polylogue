@@ -14,6 +14,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from .context import compress
 from .providers import Message, Usage
 
 __all__ = ["Turn", "Room", "MENTION_RE"]
@@ -48,6 +49,8 @@ class Room:
         self.members = list(members)
         self.roles = dict(roles or {})
         self.turns: list[Turn] = []
+        # 最近一次压缩的统计，给界面展示「省了多少」
+        self.last_compression: dict = {}
 
     # ---------------------------------------------------------------- 记录
 
@@ -117,13 +120,34 @@ class Room:
 
     # ---------------------------------------------------------------- 上下文
 
-    def context_for(self, name: str) -> list[Message]:
+    def context_for(
+        self, name: str, keep_recent: int | None = None, budget_tokens: int | None = None
+    ) -> list[Message]:
         """给某个模型看的对话历史。
 
         自己的发言是 assistant，别人的发言（含用户）都包成 user 并标上说话人。
+
+        `keep_recent` 不为 None 时开启压缩：最近若干条逐字保留，更早的压成
+        摘要放在最前面。这是治「轮次一多 token 就爆炸」的地方 —— 不压缩的话
+        每轮都要把完整转录重发一遍，成本随轮次平方增长。
+        `budget_tokens` 给硬上限，超了会继续丢最老的摘要行。
         """
+        turns = self.turns
+        digest = None
+        if keep_recent is not None:
+            digest, turns, stats = compress(self.turns, keep_recent, budget_tokens)
+            self.last_compression = stats
+
         out: list[Message] = []
-        for turn in self.turns:
+        if digest:
+            out.append(
+                Message(
+                    role="user",
+                    content="【较早的发言已压缩，摘要如下】\n" + digest,
+                    speaker="summary",
+                )
+            )
+        for turn in turns:
             if not turn.ok:
                 continue
             if turn.speaker == name:

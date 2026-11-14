@@ -3,6 +3,9 @@
 一个进程里可以同时存在多个房间，每个房间有自己的成员、预算和转录。
 同一时刻只有一个房间在跑会商，其余房间排队 —— 这是有意的：
 并行跑多个房间会让成本失控，而成本失控正是这类工具最容易死的地方。
+
+启动时如果没有任何可用凭据，不报错退出，而是进入「引导模式」：
+服务照常起来，界面显示填 key 的向导。
 """
 
 from __future__ import annotations
@@ -18,13 +21,15 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
+from . import bootstrap, config
+from .credentials import available_providers, discover, mask, save_key
 from .guard import Budget
-from .pricing import PRICE_TABLE_DATE, cost_of
+from .pricing import PRICE_TABLE_DATE
 from .providers import PRESETS, ProviderError, build_provider, resolve_name
 from .room import Room
 from .session import Session
 
-__all__ = ["serve", "App"]
+__all__ = ["serve", "App", "RoomState"]
 
 STATIC = Path(__file__).parent / "static"
 
@@ -45,9 +50,9 @@ def ensure_utf8_streams() -> None:
 def _out(text: str) -> None:
     """打印兜底：即使 reconfigure 不可用，也不能因为编码问题让服务挂掉。"""
     try:
-        print(text)
+        print(text, flush=True)
     except UnicodeEncodeError:
-        print(text.encode("ascii", "replace").decode("ascii"))
+        print(text.encode("ascii", "replace").decode("ascii"), flush=True)
 
 
 @dataclass
@@ -65,7 +70,7 @@ class RoomState:
             "id": self.id,
             "name": self.name,
             "members": self.room.members,
-            "roles": {k: v for k, v in self.room.roles.items()},
+            "roles": dict(self.room.roles),
             "turns": len(self.room.turns),
             "tokens": self.room.total_usage.total,
             "cost": cost,
@@ -75,6 +80,7 @@ class RoomState:
                 "max_calls": self.budget.max_calls,
                 "max_cost_usd": self.budget.max_cost_usd,
             },
+            "compression": self.room.last_compression,
         }
 
     def stats(self) -> list[dict]:
@@ -109,8 +115,6 @@ class QuietServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def handle_error(self, request, client_address):
-        import sys
-
         exc = sys.exc_info()[1]
         if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
             return
@@ -122,6 +126,8 @@ class App:
         self.rooms: dict[str, RoomState] = {}
         self.lock = threading.Lock()
         self.run_lock = threading.Lock()  # 同一时刻只跑一个房间
+        self.skipped: list[str] = []
+        self.origin = ""
 
     def add_room(self, state: RoomState) -> None:
         with self.lock:
@@ -134,59 +140,41 @@ class App:
         with self.lock:
             return self.rooms.pop(room_id, None) is not None
 
+    def default_room(self) -> RoomState | None:
+        for state in self.rooms.values():
+            return state
+        return None
 
-def _available_providers() -> list[dict]:
-    out = []
-    for name, preset in PRESETS.items():
-        env = preset["env"]
-        if not env:
-            available = True  # 本地模型，不需要 key
-        elif name == "gemini":
-            available = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-        else:
-            available = bool(os.environ.get(env))
-        out.append(
-            {
-                "name": name,
-                "kind": preset.get("kind", "openai"),
-                "env": env,
-                "model": preset["model"],
-                "available": available,
-            }
-        )
-    return out
+
+def _budget_from_config() -> Budget:
+    cfg = config.load().get("budget") or {}
+    return Budget(
+        max_rounds=int(cfg.get("max_rounds") or 6),
+        max_calls=int(cfg.get("max_calls") or 24),
+        max_cost_usd=cfg.get("max_cost_usd"),
+    )
 
 
 def _make_state(
     name: str,
-    members: list[dict],
+    members: list,
     roles: dict[str, str] | None = None,
     max_rounds: int = 6,
     max_calls: int = 24,
     max_cost_usd: float | None = None,
 ) -> RoomState:
-    """按请求建房间。成员可以是 ["gemini"] 或 [{"name":"gemini","model":"..."}]。"""
-    providers = {}
-    active: list[str] = []
-    errors: list[str] = []
-
+    """按请求建房间。成员可以是 ["gemini"] 或 [{"name","provider","model"}]。"""
+    normalized = []
     for item in members:
         if isinstance(item, str):
-            pname, model = item, None
-        else:
-            pname = (item or {}).get("name", "")
-            model = (item or {}).get("model") or None
-        if not pname:
-            continue
-        key = resolve_name(pname)
-        try:
-            providers[key] = build_provider(key, model=model)
-            active.append(key)
-        except ProviderError as exc:
-            errors.append(str(exc))
+            normalized.append({"name": item, "provider": resolve_name(item), "model": None})
+        elif isinstance(item, dict) and item.get("name"):
+            normalized.append(item)
 
+    providers, active, skipped = bootstrap.build_all(normalized)
     if not active:
-        raise ValueError("没有任何可用模型：" + "；".join(errors) if errors else "成员为空")
+        detail = "；".join(skipped) if skipped else "成员为空"
+        raise ValueError("没有可用模型：" + detail)
 
     room = Room(active, roles={k: v for k, v in (roles or {}).items() if k in active})
     return RoomState(
@@ -199,7 +187,7 @@ def _make_state(
 
 
 def serve(
-    members: list[str],
+    members: list[str] | None = None,
     *,
     port: int = 8765,
     host: str = "127.0.0.1",
@@ -213,28 +201,23 @@ def serve(
     custom = custom or {}
     models = models or {}
 
-    # 启动时建一个默认房间；建不起来的成员记下来，页面上提示
-    providers = {}
-    active: list[str] = []
-    skipped: list[str] = []
-    for name in members:
-        try:
-            providers[name] = build_provider(name, model=models.get(name), base_url=custom.get(name))
-            active.append(name)
-        except ProviderError as exc:
-            skipped.append(f"{name}: {exc}")
+    resolved, origin = bootstrap.resolve_members(members)
+    app.origin = origin
 
-    if not active:
-        raise SystemExit("没有任何模型可用：\n  " + "\n  ".join(skipped))
+    providers, active, skipped = bootstrap.build_all(resolved, custom, models)
+    app.skipped = skipped
 
-    default = RoomState(
-        id=uuid.uuid4().hex[:12],
-        name="默认房间",
-        room=Room(active, roles={k: v for k, v in (roles or {}).items() if k in active}),
-        providers=providers,
-        budget=budget or Budget(),
-    )
-    app.add_room(default)
+    # 有成员就建默认房间；一个都没有就进引导模式，服务照常起来
+    if active:
+        app.add_room(
+            RoomState(
+                id=uuid.uuid4().hex[:12],
+                name="默认房间",
+                room=Room(active, roles={k: v for k, v in (roles or {}).items() if k in active}),
+                providers=providers,
+                budget=budget or _budget_from_config(),
+            )
+        )
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -271,6 +254,39 @@ def serve(
         def _route(self) -> list[str]:
             return [p for p in urlparse(self.path).path.split("/") if p]
 
+        def _info(self) -> dict:
+            cfg = config.load()
+            keys = discover()
+            sources = bootstrap.credential_sources()
+
+            def usable(name: str) -> bool:
+                # 本地模型（ollama / lmstudio）不需要 key，现在就能用
+                needs_key = bool(PRESETS[name]["env"]) if name in PRESETS else True
+                return (name in keys) or not needs_key
+
+            return {
+                "providers": [
+                    {
+                        "name": name,
+                        "model": PRESETS[name]["model"] if name in PRESETS else "",
+                        "env": PRESETS[name]["env"] if name in PRESETS else "",
+                        "available": usable(name),
+                        "masked": mask(keys.get(name, "")),
+                        "source": sources.get(name, ""),
+                    }
+                    for name in sorted(PRESETS)
+                ],
+                "detected": bootstrap.detect(),
+                "presets": bootstrap.MODEL_PRESETS,
+                "price_table": PRICE_TABLE_DATE,
+                "skipped": app.skipped,
+                "origin": app.origin,
+                "onboarding": app.default_room() is None,
+                "default_room": app.default_room().id if app.default_room() else None,
+                "rooms": [r.summary() for r in app.rooms.values()],
+                "context": cfg.get("context") or {},
+            }
+
         # ---------------------------------------------------------- GET
 
         def do_GET(self) -> None:
@@ -285,16 +301,7 @@ def serve(
                 return
 
             if parts == ["api", "info"]:
-                self._json(
-                    200,
-                    {
-                        "providers": _available_providers(),
-                        "price_table": PRICE_TABLE_DATE,
-                        "skipped": skipped,
-                        "default_room": default.id,
-                        "rooms": [r.summary() for r in app.rooms.values()],
-                    },
-                )
+                self._json(200, self._info())
                 return
 
             if parts == ["api", "rooms"]:
@@ -338,6 +345,7 @@ def serve(
                         "total_cost": cost,
                         "cost_unknown": unknown,
                         "by_model": state.stats(),
+                        "compression": state.room.last_compression,
                     },
                 )
                 return
@@ -348,16 +356,17 @@ def serve(
                     self._json(404, {"error": "房间不存在"})
                     return
                 cost, unknown = state.room.total_cost()
+                comp = state.room.last_compression or {}
                 lines = [
                     f"# {state.name}",
                     "",
                     f"- 成员：{', '.join(state.room.members)}",
                     f"- tokens：{state.room.total_usage.total}",
                     f"- 估算成本：${cost:.4f}" + ("（含无价格模型，实际更高）" if unknown else ""),
-                    "",
-                    "---",
-                    "",
                 ]
+                if comp.get("compressed"):
+                    lines.append(f"- 上下文压缩：较早的 {comp['older_turns']} 条已压缩")
+                lines += ["", "---", ""]
                 for turn in state.room.turns:
                     if turn.error:
                         lines.append(f"**[{turn.speaker}]** ✗ {turn.error}")
@@ -373,6 +382,14 @@ def serve(
 
         def do_POST(self) -> None:
             parts = self._route()
+
+            if parts == ["api", "setup"]:
+                self._handle_setup()
+                return
+
+            if parts == ["api", "settings"]:
+                self._handle_settings()
+                return
 
             if parts == ["api", "rooms"]:
                 try:
@@ -424,6 +441,80 @@ def serve(
 
             self._json(404, {"error": "not found"})
 
+        def _handle_setup(self) -> None:
+            """首次引导：存 key、选档位、建房间。"""
+            try:
+                data = self._body()
+            except ValueError:
+                self._json(400, {"error": "bad json"})
+                return
+
+            provider = (data.get("provider") or "").strip()
+            api_key = (data.get("api_key") or "").strip()
+            preset = data.get("preset") or "省钱"
+
+            if api_key:
+                if not provider:
+                    provider = "openrouter"
+                save_key(provider, api_key)
+
+            rows = data.get("members")
+            if not rows:
+                rows = bootstrap.MODEL_PRESETS.get(preset) or bootstrap.MODEL_PRESETS["省钱"]
+                # 用户自己填的 key 属于哪家，就把这家的模型换进去
+                if provider and provider != "openrouter":
+                    rows = bootstrap.SINGLE_PROVIDER_DEFAULTS.get(provider, rows)
+
+            try:
+                state = _make_state("默认房间", rows)
+            except ValueError as exc:
+                self._json(400, {"error": str(exc)})
+                return
+
+            app.add_room(state)
+            config.update(onboarded=True, members=rows)
+            self._json(201, {"room": state.summary(), "info": self._info()})
+
+        def _handle_settings(self) -> None:
+            """改成员 / 预算 / 压缩参数。"""
+            try:
+                data = self._body()
+            except ValueError:
+                self._json(400, {"error": "bad json"})
+                return
+
+            changes: dict = {}
+            if "members" in data:
+                changes["members"] = data["members"]
+            if "budget" in data and isinstance(data["budget"], dict):
+                changes["budget"] = data["budget"]
+            if "context" in data and isinstance(data["context"], dict):
+                changes["context"] = data["context"]
+
+            if changes:
+                config.update(**changes)
+
+            # 成员变了就重建房间（旧房间的 provider 对不上新模型）
+            new_room = None
+            if "members" in data and data["members"]:
+                try:
+                    new_room = _make_state("默认房间", data["members"])
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                for rid in list(app.rooms):
+                    app.remove(rid)
+                app.add_room(new_room)
+
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "room": new_room.summary() if new_room else None,
+                    "info": self._info(),
+                },
+            )
+
         # ---------------------------------------------------------- 删除
 
         def do_DELETE(self) -> None:
@@ -468,7 +559,6 @@ def serve(
 
             state.cancel.clear()
 
-            # 全局只允许一个房间在跑，其余排队等待
             acquired = app.run_lock.acquire(timeout=180)
             if not acquired:
                 emit({"type": "error", "speaker": "system", "message": "另一个房间正在会商，等待超时"})
@@ -476,12 +566,15 @@ def serve(
                 return
 
             try:
+                cfg = config.load().get("context") or {}
                 session = Session(
                     state.room,
                     state.providers,
                     budget=state.budget,
                     on_turn=on_turn,
                     should_stop=state.cancel.is_set,
+                    keep_recent=cfg.get("keep_recent", 8) if cfg.get("enabled", True) else None,
+                    context_budget=cfg.get("budget_tokens", 6000) if cfg.get("enabled", True) else None,
                 )
                 try:
                     result = session.say(text)
@@ -500,6 +593,7 @@ def serve(
                         "cost": cost,
                         "cost_unknown": unknown,
                         "stats": state.stats(),
+                        "compression": state.room.last_compression,
                     }
                 )
             finally:
@@ -511,7 +605,10 @@ def serve(
 
     ensure_utf8_streams()
     _out(f"polylogue 工作台 → {url}")
-    _out(f"默认房间成员：{', '.join(default.room.members)}")
+    if active:
+        _out(f"房间成员：{', '.join(active)}（{origin}）")
+    else:
+        _out("没有检测到可用的 API key —— 打开上面的地址，页面上填一个就能用。")
     if skipped:
         _out("跳过的成员：")
         for item in skipped:
@@ -519,8 +616,6 @@ def serve(
     _out(f"价格表版本：{PRICE_TABLE_DATE}（估算，以各家官网为准）")
     _out("Ctrl+C 退出")
 
-    # 启动信息都打完了才通知「就绪」—— 否则调用方会以为服务好了，
-    # 而实际上可能在打印这一步就已经挂了。
     if on_ready:
         on_ready(url)
 
