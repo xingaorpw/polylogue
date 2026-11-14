@@ -18,7 +18,7 @@
 - **工作台 HTTP 接口**：`/api/info`、`/api/rooms`（增删查）、`/api/rooms/{id}/say`（SSE）、`/stop`、`/stats`、`/export`，可以直接当 API 用。
 - **交互模式**：`/cost` 看每个模型的花费、`/export` 导出转录。
 - **角色预设**：`critic` / `builder` / `reviewer` / `explorer`，避免所有模型说同一件事。
-- 100 个测试，全部离线；CI 覆盖 Ubuntu + Windows、Python 3.9 / 3.10 / 3.12，另加冒烟任务验证「缺 key 必须报错」和「工作台必须真的起得来且不引外部资源」。
+- 103 个测试，全部离线；CI 覆盖 Ubuntu + Windows、Python 3.9 / 3.10 / 3.12，另加冒烟任务验证「缺 key 必须报错」和「工作台必须真的起得来且不引外部资源」。
 
 ### Notes
 

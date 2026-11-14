@@ -1,7 +1,7 @@
 # polylogue
 
 [![CI](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml/badge.svg)](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml)
-![tests](https://img.shields.io/badge/tests-100%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-103%20passing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![deps](https://img.shields.io/badge/dependencies-0-success)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -227,7 +227,7 @@ builder: 用单写者队列，代价是吞吐降到三分之一。
 python -m unittest discover -s tests -t . -v
 ```
 
-100 个用例，全部离线，不花钱：
+103 个用例，全部离线，不花钱：
 
 | 文件 | 覆盖 |
 |---|---|
