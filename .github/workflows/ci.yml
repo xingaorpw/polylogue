@@ -36,6 +36,16 @@ jobs:
       - name: 单元测试 + 端到端测试
         run: python -m unittest discover -s tests -t . -v
 
+      - name: 非 UTF-8 stdout 下必须也能跑
+        if: runner.os == 'Linux'
+        env:
+          PYTHONIOENCODING: cp1252
+        run: |
+          # Windows runner 的 stdout 可能是 cp1252，打印中文会抛 UnicodeEncodeError。
+          # 那个异常会直接杀掉服务线程，表现成「启动后连不上」。
+          # 在 Linux 上主动模拟这个编码，提前抓住同类问题。
+          python -m unittest discover -s tests -t . -v
+
   smoke:
     name: 冒烟
     runs-on: ubuntu-latest

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +27,27 @@ from .session import Session
 __all__ = ["serve", "App"]
 
 STATIC = Path(__file__).parent / "static"
+
+
+def ensure_utf8_streams() -> None:
+    """Windows 下 stdout 可能是 cp1252，打印中文会抛 UnicodeEncodeError。
+
+    这个异常会直接杀掉服务线程 —— 用户看到的是「启动后立刻连不上」。
+    这里把编码改成 utf-8 并允许替换，保证打印永远不会抛。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+def _out(text: str) -> None:
+    """打印兜底：即使 reconfigure 不可用，也不能因为编码问题让服务挂掉。"""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", "replace").decode("ascii"))
 
 
 @dataclass
@@ -484,22 +506,26 @@ def serve(
     server = QuietServer((host, port), Handler)
     actual_port = server.server_address[1]
     url = f"http://{host}:{actual_port}"
+
+    ensure_utf8_streams()
+    _out(f"polylogue 工作台 → {url}")
+    _out(f"默认房间成员：{', '.join(default.room.members)}")
+    if skipped:
+        _out("跳过的成员：")
+        for item in skipped:
+            _out(f"  - {item}")
+    _out(f"价格表版本：{PRICE_TABLE_DATE}（估算，以各家官网为准）")
+    _out("Ctrl+C 退出")
+
+    # 启动信息都打完了才通知「就绪」—— 否则调用方会以为服务好了，
+    # 而实际上可能在打印这一步就已经挂了。
     if on_ready:
         on_ready(url)
-
-    print(f"polylogue 工作台 → {url}")
-    print(f"默认房间成员：{', '.join(default.room.members)}")
-    if skipped:
-        print("跳过的成员：")
-        for item in skipped:
-            print(f"  - {item}")
-    print(f"价格表版本：{PRICE_TABLE_DATE}（估算，以各家官网为准）")
-    print("Ctrl+C 退出")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n已停止")
+        _out("\n已停止")
     finally:
         server.server_close()
     return 0

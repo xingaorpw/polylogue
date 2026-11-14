@@ -276,5 +276,84 @@ class TestTranscript(WebCase):
         self.assertEqual(status, 404)
 
 
+class TestWindowsEncoding(unittest.TestCase):
+    """Windows 下 stdout 可能是 cp1252，打印中文会抛 UnicodeEncodeError。
+
+    这个 bug 曾让 CI 的 Windows job 全红：服务线程在打印启动信息时死掉，
+    之后所有连接都被拒。它也会打到真实用户 —— 任何把输出重定向的场景。
+    """
+
+    def test_out_survives_cp1252_stdout(self):
+        import io
+        import sys as _sys
+        from unittest import mock
+
+        from polylogue.web import _out
+
+        buf = io.BytesIO()
+        stream = io.TextIOWrapper(buf, encoding="cp1252")
+        with mock.patch.object(_sys, "stdout", stream):
+            _out("polylogue 工作台 → http://127.0.0.1:8765")  # 不能抛
+
+    def test_ensure_utf8_streams_reconfigures(self):
+        import io
+        import sys as _sys
+        from unittest import mock
+
+        from polylogue.web import ensure_utf8_streams
+
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        with mock.patch.object(_sys, "stdout", stream):
+            ensure_utf8_streams()
+            self.assertEqual(stream.encoding.lower().replace("-", ""), "utf8")
+            print("工作台")  # 现在不该抛了
+
+    def test_server_survives_cp1252_stdout(self):
+        """真的起一个子进程，stdout 设成 cp1252，确认服务不会在启动时死掉。"""
+        import socket
+        import subprocess
+        import sys as _sys
+        import time
+        import urllib.request
+        from pathlib import Path
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        env = dict(**__import__("os").environ)
+        env["PYTHONIOENCODING"] = "cp1252"
+        root = Path(__file__).resolve().parent.parent
+
+        proc = subprocess.Popen(
+            [_sys.executable, "-m", "polylogue", "--web", "--models", "ollama", "--port", str(port)],
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+        try:
+            ok = False
+            for _ in range(40):
+                if proc.poll() is not None:
+                    break  # 进程已经死了，别等了
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/info", timeout=1) as r:
+                        if r.status == 200:
+                            ok = True
+                            break
+                except Exception:
+                    time.sleep(0.25)
+
+            self.assertIsNone(proc.poll(), msg="进程在启动阶段就退出了")
+            self.assertTrue(ok, msg="cp1252 的 stdout 下服务没能响应")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -82,8 +82,10 @@ def _footer(room: Room, stop) -> None:
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-        except (AttributeError, ValueError):
+            # errors="replace" 很关键：Windows 下 stdout 可能是 cp1252，
+            # 打印中文会抛 UnicodeEncodeError 直接把进程干掉。
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError, OSError):
             pass
 
     p = argparse.ArgumentParser(
