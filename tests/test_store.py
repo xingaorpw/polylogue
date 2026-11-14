@@ -3,6 +3,7 @@
 这些都是「关掉程序再打开还在不在」的东西，坏了用户会直接丢历史。
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -218,6 +219,56 @@ class TestAvatars(Base):
         store.save_avatar(c["id"], "data:image/png;base64,AAA")
         store.remove_contact(c["id"])
         self.assertIsNone(store.load_avatar(c["id"]))
+
+
+class TestLegacyConfig(unittest.TestCase):
+    """0.2 的配置里没有 contacts/categories，升级后不能崩、也不能丢设置。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = Path(self.tmp.name) / "config.json"
+        self.patch = mock.patch.object(config, "CONFIG_PATH", self.cfg)
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def test_old_config_gains_contacts(self):
+        self.cfg.write_text(
+            json.dumps(
+                {
+                    "onboarded": True,
+                    "api_keys": {"openrouter": "sk-or-v1-old"},
+                    "members": [{"name": "x", "provider": "openrouter", "model": "a/b"}],
+                    "budget": {"max_rounds": 4, "max_calls": 10, "max_cost_usd": 0.3},
+                    "context": {"keep_recent": 5, "enabled": True, "budget_tokens": 3000},
+                    "theme": "light",
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = store.load_state()
+        self.assertGreaterEqual(len(state["contacts"]), 8)
+        self.assertIn("常用", state["categories"])
+
+        # 老设置必须原样保留，不能被默认值覆盖
+        cfg = config.load()
+        self.assertEqual(cfg["api_keys"]["openrouter"], "sk-or-v1-old")
+        self.assertEqual(cfg["budget"]["max_rounds"], 4)
+        self.assertEqual(cfg["context"]["keep_recent"], 5)
+        self.assertEqual(cfg["theme"], "light")
+
+    def test_corrupt_config_does_not_crash(self):
+        self.cfg.write_text("{这不是 json", encoding="utf-8")
+        state = store.load_state()
+        self.assertGreaterEqual(len(state["contacts"]), 8)
+
+    def test_contacts_written_back_once(self):
+        store.load_state()
+        first = self.cfg.read_text(encoding="utf-8")
+        store.load_state()
+        self.assertEqual(self.cfg.read_text(encoding="utf-8"), first, "第二次不该再重写配置")
 
 
 if __name__ == "__main__":
