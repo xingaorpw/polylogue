@@ -206,10 +206,12 @@ def serve(
     budget: Budget | None = None,
     roles: dict[str, str] | None = None,
     custom: dict[str, str] | None = None,
+    models: dict[str, str] | None = None,
     on_ready: Callable[[str], None] | None = None,
 ) -> int:
     app = App()
     custom = custom or {}
+    models = models or {}
 
     # 启动时建一个默认房间；建不起来的成员记下来，页面上提示
     providers = {}
@@ -217,7 +219,7 @@ def serve(
     skipped: list[str] = []
     for name in members:
         try:
-            providers[name] = build_provider(name, base_url=custom.get(name))
+            providers[name] = build_provider(name, model=models.get(name), base_url=custom.get(name))
             active.append(name)
         except ProviderError as exc:
             skipped.append(f"{name}: {exc}")

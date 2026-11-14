@@ -6,9 +6,16 @@ HTTP 请求 → 房间管理 → 会话编排 → 并行调用 → SSE 推回。
 
 import http.client
 import json
+import os
+import socket
+import subprocess
+import sys
 import threading
+import time
 import unittest
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from polylogue.guard import Budget
 from polylogue.web import serve
@@ -353,6 +360,64 @@ class TestWindowsEncoding(unittest.TestCase):
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+class TestCliWebWiring(unittest.TestCase):
+    """`--web` 必须把 `--provider` 和 `--model` 传下去。
+
+    曾经漏传：Web 模式下自定义端点被静默忽略，进程直接以
+    「不认识的 provider」退出，而报错信息还在提示用户用 --provider 自定义。
+    """
+
+    def test_provider_flag_reaches_web_mode(self):
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeUpstream)
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        up_url = f"http://127.0.0.1:{upstream.server_address[1]}/v1"
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        root = Path(__file__).resolve().parent.parent
+
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "polylogue", "--web",
+                "--models", "mybot",
+                "--provider", f"mybot={up_url}",
+                "--model", "mybot=some-model",
+                "--port", str(port),
+            ],
+            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+        )
+        try:
+            info = None
+            for _ in range(60):
+                if proc.poll() is not None:
+                    break
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/info", timeout=1) as r:
+                        info = json.loads(r.read())
+                    break
+                except Exception:
+                    time.sleep(0.2)
+
+            if proc.poll() is not None:
+                out = proc.stdout.read().decode("utf-8", "replace") if proc.stdout else ""
+                self.fail(f"--web 没起来，进程退出了。输出：{out[:500]}")
+
+            self.assertIsNotNone(info, msg="--web 起来了但 /api/info 取不到")
+            members = info["rooms"][0]["members"]
+            self.assertEqual(members, ["mybot"], msg="--provider 定义的成员没进房间")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            upstream.shutdown()
 
 
 if __name__ == "__main__":

@@ -49,12 +49,18 @@ def _parse_roles(spec: str | None, members: list[str]) -> dict[str, str]:
     return roles
 
 
-def _build_providers(members: list[str], models: dict[str, str], custom: list[str]) -> dict:
+def _parse_custom(items: list[str]) -> dict:
+    """把 --provider NAME=URL 解析成 {name: url}。"""
     custom_map = {}
-    for item in custom:
+    for item in items:
         name, _, url = item.partition("=")
         if url:
             custom_map[name.strip()] = url.strip()
+    return custom_map
+
+
+def _build_providers(members: list[str], models: dict[str, str], custom: list[str]) -> dict:
+    custom_map = _parse_custom(custom)
 
     providers = {}
     for name in members:
@@ -141,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
                 max_cost_usd=args.max_cost,
             ),
             roles=roles,
+            # 这两个之前漏传了：Web 模式下 --provider 和 --model 会被静默忽略，
+            # 而报错信息还在提示用户用 --provider 自定义，等于自己打自己脸。
+            custom=_parse_custom(args.provider),
+            models=models,
         )
 
     providers = _build_providers(members, models, args.provider)
