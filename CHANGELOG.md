@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-14
+
+这一版只做一件事：把 API key 可能漏的每条路都堵上。
+
+### Added
+
+- **终端无回显录入**：`polylogue --login PROVIDER` 用 getpass 读 key，不经过网页，
+  不进 shell 历史、不进进程列表。配套 `--whoami`（只显示掩码）和 `--forget`。
+- **跨站请求防护**：写操作要求 `Host` 是本机回环、`Origin`（若有）是本机、
+  且 `Content-Type: application/json`。三道闸分别挡 DNS rebinding、跨站请求
+  和表单 CSRF。
+- **读操作也校验来源**：DNS rebinding 不只能改配置，还能把 `/api/conversations`
+  读走，所以 GET 同样校验 Host/Origin。
+- **输出脱敏**：所有接口响应、SSE 事件、终端输出统一过 `redact()` ——
+  已知 key 精确替换，另有正则兜住「长得像 key」的串，防止上游把凭据回显进错误信息。
+- **请求体上限** 2MB，超出直接拒绝。
+- **46 个安全测试**（`tests/test_secrets.py`）：把每个 GET 接口的原始响应扫一遍，
+  断言完整 key 不在里面；覆盖掩码、脱敏、CSRF、文件权限、前端标记。
+
+### Changed
+
+- **`mask()` 收紧**：只留前 4 后 2，且总长超过 16 才露 —— 短 key 直接全藏，
+  因为短串露 6 个字符可能就把大部分内容给出去了。
+- **网页输入框加固**：`autocomplete="new-password"` + 关掉密码管理器钩子
+  （`data-lpignore` / `data-1p-ignore`）+ 关拼写检查；加了显示/隐藏按钮，
+  默认隐藏、失焦自动收回；提交后立刻清空，key 不留在 DOM 也不进浏览器存储。
+- **故意不支持 `--key sk-xxx`**：命令行参数会留在 shell 历史和进程列表里。
+
+### Fixed
+
+- **Windows 上配置文件的权限形同虚设**：`os.chmod` 在 Windows 上只改只读位、
+  不改 ACL，明文 key 同机其他账户读得到。现在额外用 `icacls` 去掉继承、
+  只授权当前用户。
+- **`save_key` 不是原子写**：原来直接 `write_text`，崩在中间会把整个 config 写坏，
+  连带通讯录和分类一起丢。现在走统一的「临时文件 → fsync → replace」。
+- **`getpass` 在输入被重定向时会卡死**：Windows 上只要 `sys.stdin is sys.__stdin__`
+  就走 msvcrt 读真实键盘、完全忽略管道。现在先判 `isatty()`，非终端自己读一行，
+  并明确告知「这里关不掉回显」，不假装安全。
+
 ## [0.3.1] - 2026-11-14
 
 ### Fixed

@@ -14,23 +14,32 @@
 安全约定：
 - 只在本地读，不写日志、不上传、不回显完整值
 - `mask()` 是唯一允许出现在界面/终端里的形式
+- `redact()` 用来擦掉任何「可能已经混进文本里」的 key（错误信息、异常、日志）
 - 用户可以用 `POLYLOGUE_NO_REUSE=1` 关掉对 DSH 的复用
+- 终端输入走 `prompt_secret()`（getpass，无回显），不接受命令行参数 ——
+  命令行参数会出现在进程列表和 shell 历史里
 """
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
+from . import config
 from .providers import PRESETS
 
 __all__ = [
     "discover",
     "available_providers",
     "mask",
+    "redact",
+    "prompt_secret",
     "credential_sources",
+    "save_key",
     "DSH_CREDENTIALS",
     "OWN_CONFIG",
 ]
@@ -50,14 +59,73 @@ _ALIASES = {
 # 复用顺序：OpenRouter 放前面，因为一个 key 覆盖最多厂商
 _PREFERRED = ["openrouter", "openai", "claude", "gemini", "grok", "deepseek"]
 
+# 长得像 key 的东西。用来兜住「不知道具体值但一看就是 key」的泄漏，
+# 比如上游错误响应体里回显了我们不认识的凭据。
+_KEY_SHAPE = re.compile(r"\b(?:sk|pk|gsk|xai|api)[-_][A-Za-z0-9_\-]{12,}")
+_HIDDEN = "sk-…（已隐藏）"
+
 
 def mask(value: str) -> str:
-    """唯一允许出现在界面上的形式。"""
+    """唯一允许出现在界面上的形式。
+
+    只留前 4 后 2，且总长超过 16 才露这两段 —— 短 key 直接全藏，
+    因为短串露 6 个字符可能就把大部分内容给出去了。
+    """
     if not value:
         return ""
-    if len(value) <= 10:
+    value = value.strip()
+    if len(value) <= 16:
         return "…"
     return f"{value[:4]}…{value[-2:]}"
+
+
+def redact(text: str, secrets=None) -> str:
+    """把 key 从任何要展示/记录的文本里抹掉。
+
+    两层：
+    1. 已知的 key 值 —— 精确替换
+    2. 长得像 key 的串 —— 正则兜底，防止上游把别人的凭据回显进错误信息
+
+    不传 `secrets` 时自己去发现一遍；传空列表表示只做正则兜底。
+    """
+    if not text or not isinstance(text, str):
+        return text
+
+    values = discover().values() if secrets is None else secrets
+    for value in values:
+        if isinstance(value, str) and len(value) >= 8 and value in text:
+            text = text.replace(value, _HIDDEN)
+
+    return _KEY_SHAPE.sub(_HIDDEN, text)
+
+
+def prompt_secret(prompt: str = "粘贴 API key（输入时不显示）：") -> str:
+    """从终端无回显地读一个 key。
+
+    用 getpass 而不是 input()：终端不显示、不进 shell 历史、不进进程列表。
+
+    为什么要先自己判 isatty：Windows 上 getpass 只要 `sys.stdin is sys.__stdin__`
+    就会走 msvcrt.getwch() 读**真实键盘**，完全忽略管道 —— 输入被重定向时
+    会直接卡死。所以不是终端就不交给它，自己读一行并明确告知「回显关不掉」，
+    不假装安全。
+    """
+    try:
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        interactive = False
+
+    if not interactive:
+        print("（输入来自管道/重定向，这里关不掉回显）", file=sys.stderr, flush=True)
+        try:
+            return (sys.stdin.readline() or "").strip()
+        except (AttributeError, OSError, ValueError):
+            return ""
+
+    try:
+        value = getpass.getpass(prompt)
+    except (EOFError, OSError):
+        return ""
+    return (value or "").strip()
 
 
 def _parse_dsh_refs(text: str) -> dict[str, str]:
@@ -169,22 +237,28 @@ def available_providers() -> list[str]:
 
 
 def save_key(provider: str, api_key: str) -> None:
-    """写进自己的配置，不动 DSH 的文件。"""
+    """写进自己的配置，不动 DSH 的文件。
+
+    走 `config.write_json_atomic`：原子写 + fsync + 收紧权限。
+    以前这里是直接 `write_text`，崩在中间会把整个 config 写坏 ——
+    连带里面的通讯录和分类一起丢。
+    """
     data = {}
     if OWN_CONFIG.is_file():
         try:
             data = json.loads(OWN_CONFIG.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             data = {}
-    keys = data.setdefault("api_keys", {})
+    if not isinstance(data, dict):
+        data = {}
+
+    keys = data.get("api_keys")
+    if not isinstance(keys, dict):
+        keys = {}
     if api_key:
         keys[provider] = api_key
     else:
         keys.pop(provider, None)
+    data["api_keys"] = keys
 
-    OWN_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    OWN_CONFIG.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        OWN_CONFIG.chmod(0o600)
-    except OSError:
-        pass
+    config.write_json_atomic(OWN_CONFIG, data)

@@ -207,6 +207,13 @@
   .pick .p .nm{font-size:13px}
   .pick .p .sub{font-size:10.5px}
   .err{color:var(--danger);font-size:12px;min-height:16px;margin-top:8px}
+  /* 密钥输入：默认不显示，眼睛按钮才临时露出来 */
+  .secretwrap{position:relative}
+  .secretwrap input{padding-right:40px;letter-spacing:1.5px;font-family:ui-monospace,Consolas,monospace}
+  .secretwrap input[type="password"]{letter-spacing:2.5px}
+  .secretwrap .eye{position:absolute;right:3px;top:50%;transform:translateY(-50%);
+    width:30px;height:30px;font-size:13px;border-radius:7px}
+  .secretwrap .eye.on{color:var(--warn)}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .chk{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;cursor:pointer}
   .chk input{width:auto}
@@ -392,7 +399,7 @@
     <div class="sh">
       <h2>先接上一个模型</h2>
       <div class="desc">填一次就够，之后不用再管。key 只存在本机
-        <code>~/.polylogue/config.json</code>，不会上传。</div>
+        <code>~/.polylogue/config.json</code>（权限已收紧到仅当前用户），不会上传。</div>
     </div>
     <div class="sb">
       <div id="onbFound"></div>
@@ -410,9 +417,16 @@
         </div>
         <div>
           <label class="lbl">API key</label>
-          <input id="onbKey" type="password" placeholder="粘贴 key" autocomplete="off">
+          <div class="secretwrap">
+            <input id="onbKey" type="password" placeholder="粘贴 key（默认不显示）"
+                   autocomplete="new-password" autocapitalize="off" autocorrect="off"
+                   spellcheck="false" data-lpignore="true" data-1p-ignore="true">
+            <button class="ico eye" id="onbEye" type="button" title="显示 / 隐藏">◉</button>
+          </div>
         </div>
       </div>
+      <div class="hint" style="margin-top:8px">key 只走本机回环连接，不写日志、不进浏览器存储；
+        提交后输入框立即清空。</div>
       <div class="err" id="onbErr"></div>
     </div>
     <div class="sf"><button class="btn" id="onbGo">开始</button></div>
@@ -1021,6 +1035,9 @@ function openSettings(){
 
 function showOnboarding(){
   const found = (S.info.detected && S.info.detected.providers) || [];
+  // 每次打开都从「隐藏」开始，不继承上一次的状态
+  $("onbKey").value = "";
+  hideKey();
   const box = $("onbFound");
   box.innerHTML = "";
   for(const p of found){
@@ -1039,15 +1056,41 @@ function showOnboarding(){
 
 async function submitOnb(extra){
   $("onbErr").textContent = "";
+
+  // 读一次就清空：不让 key 停在 DOM 里，也不让它进入任何前端状态
+  const raw = $("onbKey").value.trim();
+  $("onbKey").value = "";
+  hideKey();
+
   const body = Object.assign({
     provider: $("onbProv").value,
-    api_key: $("onbKey").value.trim()
+    api_key: raw
   }, extra || {});
+
   try{
     const d = await post("/api/setup", body);
     closeModal("mOnb");
     await refresh(d.info);
-  }catch(e){ $("onbErr").textContent = e.message; }
+  }catch(e){
+    $("onbErr").textContent = e.message;
+  }
+}
+
+/* 密钥显隐：默认藏，点了才临时露出，失焦/提交后自动收回 */
+function showKey(){
+  const i = $("onbKey");
+  if(!i) return;
+  i.type = "text";
+  $("onbEye").classList.add("on");
+}
+function hideKey(){
+  const i = $("onbKey");
+  if(!i) return;
+  i.type = "password";
+  $("onbEye").classList.remove("on");
+}
+function toggleKey(){
+  if($("onbKey").type === "password") showKey(); else hideKey();
 }
 
 /* ───────── 事件 ───────── */
@@ -1121,6 +1164,11 @@ $("setGo").onclick = async () => {
 
 $("thDark").onclick = () => setTheme("dark");
 $("thLight").onclick = () => setTheme("light");
+$("onbEye").onclick = toggleKey;
+// 阻止眼睛按钮抢走输入框焦点，否则「blur 收回」会和「点击显示」打架
+$("onbEye").addEventListener("mousedown", e => e.preventDefault());
+// 失焦自动收回：用户点了眼睛看一眼，切走时不该一直明文留在屏幕上
+$("onbKey").addEventListener("blur", hideKey);
 $("onbGo").onclick = () => {
   if(!$("onbKey").value.trim()){
     const found = (S.info && S.info.detected && S.info.detected.providers) || [];

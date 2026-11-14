@@ -83,6 +83,50 @@ def _footer(room: Room, stop) -> None:
     print(f"\n— {usage.total} tokens · {money} · {stop.message if stop else ''}")
 
 
+def _whoami() -> int:
+    """只显示掩码。这是唯一允许把凭据信息打到终端的形状。"""
+    from .credentials import credential_sources, discover, mask
+
+    keys = discover()
+    if not keys:
+        print("本机没有可用的 key。用 polylogue --login openrouter 录入一个。")
+        return 0
+    sources = credential_sources()
+    print(f"{'provider':<14} {'key':<16} 来源")
+    print("-" * 52)
+    for name in sorted(keys):
+        print(f"{name:<14} {mask(keys[name]):<16} {sources.get(name, '未知')}")
+    print("\n以上都是掩码，完整 key 不会显示。")
+    return 0
+
+
+def _login(provider: str) -> int:
+    """终端无回显录入 key。
+
+    为什么不支持 `--key sk-xxx`：命令行参数会留在 shell 历史和进程列表里，
+    等于把 key 抄在墙上。只能用交互式输入。
+    """
+    from .credentials import mask, prompt_secret, save_key
+    from .providers import PRESETS
+
+    if provider not in PRESETS:
+        print(f"不认识的 provider：{provider}")
+        print("可用：" + ", ".join(sorted(PRESETS)))
+        return 2
+
+    print(f"给 {provider} 录入 API key。")
+    print("输入时不显示、不进 shell 历史。直接回车取消。")
+    value = prompt_secret("API key: ")
+    if not value:
+        print("已取消，没有改动。")
+        return 1
+
+    save_key(provider, value)
+    print(f"已保存 {provider}: {mask(value)}")
+    print("存在 ~/.polylogue/config.json，权限已收紧到仅当前用户可读。")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -119,7 +163,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--port", type=int, default=8765, help="Web 界面端口，默认 8765")
     p.add_argument("--list-providers", action="store_true", help="列出支持的 provider 后退出")
+    p.add_argument(
+        "--login",
+        metavar="PROVIDER",
+        nargs="?",
+        const="openrouter",
+        default=None,
+        help="在终端无回显地录入 API key（不经过网页，也不进 shell 历史）",
+    )
+    p.add_argument("--forget", metavar="PROVIDER", help="删掉本机存的某个 provider 的 key")
+    p.add_argument("--whoami", action="store_true", help="列出本机有哪些 key（只显示掩码）")
     args = p.parse_args(argv)
+
+    if args.whoami:
+        return _whoami()
+
+    if args.forget:
+        from .credentials import save_key
+
+        save_key(args.forget, "")
+        print(f"已删除 {args.forget} 的 key")
+        return 0
+
+    if args.login is not None:
+        return _login(args.login)
 
     if args.list_providers:
         from .providers import ALIASES, PRESETS

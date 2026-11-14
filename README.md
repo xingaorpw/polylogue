@@ -1,7 +1,7 @@
 # polylogue
 
 [![CI](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml/badge.svg)](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml)
-![tests](https://img.shields.io/badge/tests-233%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-279%20passing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![deps](https://img.shields.io/badge/dependencies-0-success)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -203,6 +203,62 @@ openrouter 余额不够：这次请求按 4096 tokens 预留，账户只够 1599
 推理模型把预算全花在思考上、正文返回空的时候，也会明确告诉你，而不是
 在界面上留一个空气泡。
 
+## key 是怎么保护的
+
+一个本地工具存了你的 API key，就得对得起这个信任。做了这几件事。
+
+**输入时不显示**
+
+- 网页里是 `type="password"` + `autocomplete="new-password"`，关掉浏览器自动填充和
+  密码管理器（`data-lpignore` / `data-1p-ignore`），也不做拼写检查
+- 想看的时候点眼睛临时露出来，**失焦自动收回**
+- 提交后输入框立刻清空 —— key 不留在 DOM 里，也不进 localStorage / cookie
+
+**终端录入不经过网页**
+
+```bash
+polylogue --login openrouter   # 无回显，不进 shell 历史、不进进程列表
+polylogue --whoami             # 只看掩码
+polylogue --forget openrouter  # 删掉
+```
+
+**故意不支持 `--key sk-xxx`** —— 命令行参数会留在 shell 历史和进程列表里，
+等于把 key 抄在墙上。只能用交互式输入。
+
+**传输只走本机回环**
+
+工作台绑定 `127.0.0.1`，key 只在本机浏览器和本机进程之间走一次 POST body，
+响应带 `Cache-Control: no-store`。
+
+**挡跨站请求**
+
+三道闸，任何一个不过就拒绝：
+
+| 闸 | 挡什么 |
+|---|---|
+| `Host` 必须是 `127.0.0.1` / `localhost` / `[::1]` | DNS rebinding —— 恶意域名解析到 127.0.0.1 后在浏览器眼里变成同源，直接读走你的历史 |
+| 有 `Origin` 就必须是本机 | 别的网页偷偷发请求改你的 key / 把 base_url 指向它自己的服务器 |
+| 有 body 的写操作必须 `Content-Type: application/json` | 表单 CSRF —— 表单发不出 JSON，而跨源发 JSON 会触发预检，我们从不回 CORS 头 |
+
+**落盘收紧权限**
+
+`~/.polylogue/config.json` 里有明文 key。POSIX 上 `chmod 600`；Windows 上
+`chmod` 基本是空操作，所以额外用 `icacls` 去掉继承、只授权当前用户。
+写入是「临时文件 → fsync → replace」，崩在中间不会留下半个文件。
+
+**显示和日志都脱敏**
+
+- 界面上只有掩码（`sk-o…a3`），短 key 直接全藏
+- 所有接口响应、SSE 事件、终端输出都过一遍 `redact()`：已知 key 精确替换，
+  再加一条正则兜住「长得像 key」的串 —— 防止上游把凭据回显进错误信息
+- 有测试把每个 GET 接口的原始响应扫一遍，断言完整 key 不在里面
+
+**说清楚没做什么**
+
+没有加密。文件里是明文，靠的是文件权限 —— 能读你用户目录的东西（同账户下的
+其他进程、备份工具、管理员权限的程序）仍然读得到。真要做到「拿到文件也没用」
+得接系统钥匙串（Windows DPAPI / macOS Keychain），那是下一步的事，现在不假装有。
+
 ## 它凭什么比单开一个模型好
 
 ### 1. 模型只被点名时才说话
@@ -237,10 +293,16 @@ openrouter 余额不够：这次请求按 4096 tokens 预留，账户只够 1599
 | `--sequential` | 同轮改串行 |
 | `--provider NAME=URL` | 自定义 OpenAI 兼容端点 |
 | `--list-providers` | 列出 14 个预设 |
+| `--login PROVIDER` | 终端无回显录入 key |
+| `--whoami` | 看本机有哪些 key（只显示掩码） |
+| `--forget PROVIDER` | 删掉某个 key |
 
 ## 已知限制
 
 - **一个 key 才能开工**。程序没法凭空造出模型访问权，能省的只是配置步骤。
+- **key 是明文存的，没有加密**。保护手段是文件权限（POSIX 600 / Windows ACL）。
+  同账户下能读你用户目录的程序照样读得到 —— 那是操作系统层面的信任边界，
+  本程序不越权假装能防。
 - **只有 OpenRouter 这条路验证过真实调用**。省钱档和免费档各 3 个模型都真打过；
   直连 Anthropic / Gemini / xAI 官方接口的适配器有单元测试，但**没有用真 key 打过**。
 - **免费模型会限流**。实测 14 个 `:free` 模型里 11 个能出内容，其中若干会把
@@ -257,7 +319,9 @@ openrouter 余额不够：这次请求按 4096 tokens 预留，账户只够 1599
 - **Q 版头像是手写的 SVG，不是官方素材**。用配色和标志性元素区分厂商，
   不是各家的官方形象。
 - **搜索是全文顺序扫描**。对话上百个之后会变慢，没有建索引。
-- **工作台没有鉴权**。默认只监听 `127.0.0.1`，别改成 `0.0.0.0` 挂公网。
+- **工作台没有账号鉴权**。靠的是「只监听 127.0.0.1 + 校验 Host/Origin」，
+  能挡住网页和 DNS rebinding，但挡不住**本机其他用户**直接连这个端口。
+  别改成 `0.0.0.0` 挂公网。
 
 ## 跑测试
 
@@ -265,7 +329,7 @@ openrouter 余额不够：这次请求按 4096 tokens 预留，账户只够 1599
 python -m unittest discover -s tests -t .
 ```
 
-233 个测试，全部离线（用假上游，不打真实 API）。
+279 个测试，全部离线（用假上游，不打真实 API）。
 
 ## License
 

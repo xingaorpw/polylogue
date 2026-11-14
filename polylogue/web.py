@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import avatars, bootstrap, config, store
+from . import avatars, bootstrap, config, credentials, store
 from .credentials import discover, mask, save_key
 from .guard import Budget
 from .pricing import PRICE_TABLE_DATE
@@ -32,6 +32,15 @@ from .session import Session
 __all__ = ["serve", "App"]
 
 STATIC = Path(__file__).parent / "static"
+
+
+# 只认本机回环。DNS rebinding 会把恶意域名解析到 127.0.0.1，
+# 校验 Host 是唯一能识破的办法。
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+# 请求体上限。头像 data URI 最大 1.4MB，2MB 留足余量；
+# 再大就是有人在拿我们当内存垃圾桶。
+MAX_BODY = 2 * 1024 * 1024
 
 
 def ensure_utf8_streams() -> None:
@@ -47,10 +56,27 @@ def ensure_utf8_streams() -> None:
 
 
 def _out(text: str) -> None:
+    # 终端输出也脱敏：错误信息里可能夹带上游回显的凭据
+    text = credentials.redact(text)
     try:
         print(text, flush=True)
     except UnicodeEncodeError:
         print(text.encode("ascii", "replace").decode("ascii"), flush=True)
+
+
+def _scrub(obj):
+    """递归脱敏。
+
+    为什么不只在错误分支里处理：接口一多，总有一个分支会漏。
+    统一在出口擦一遍，新增字段也不会意外带出 key。
+    """
+    if isinstance(obj, str):
+        return credentials.redact(obj)
+    if isinstance(obj, dict):
+        return {k: _scrub(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrub(v) for v in obj]
+    return obj
 
 
 class QuietServer(ThreadingHTTPServer):
@@ -205,7 +231,7 @@ def serve(
         # ------------------------------------------------------ 工具
 
         def _json(self, code: int, obj) -> None:
-            data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            data = json.dumps(_scrub(obj), ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -228,7 +254,70 @@ def serve(
             length = int(self.headers.get("Content-Length") or 0)
             if not length:
                 return {}
+            if length > MAX_BODY:
+                raise ValueError("请求体太大")
             return json.loads(self.rfile.read(length) or b"{}")
+
+        # -------------------------------------------------- 来源校验
+
+        def _host_ok(self) -> bool:
+            """Host 必须是本机回环，挡 DNS rebinding。
+
+            否则恶意域名可以解析到 127.0.0.1，浏览器就把它当成同源，
+            页面里的脚本能直接读写这个工作台。
+            """
+            host = (self.headers.get("Host") or "").strip().lower()
+            if not host:
+                return False
+            if host.startswith("["):  # [::1]:8765
+                name = host.split("]")[0] + "]"
+            else:
+                name = host.rsplit(":", 1)[0]
+            return name in _LOOPBACK_HOSTS
+
+        def _origin_ok(self) -> bool:
+            """有 Origin 就必须也是本机，挡跨站请求。
+
+            浏览器发的跨源写请求一定带 Origin；同源页面和 curl 不带或带本机。
+            """
+            origin = (self.headers.get("Origin") or "").strip()
+            if not origin:
+                return True
+            parsed = urlparse(origin)
+            if parsed.scheme not in ("http", "https"):
+                return False
+            host = (parsed.hostname or "").lower()
+            return host in _LOOPBACK_HOSTS
+
+        def _guard_write(self) -> bool:
+            """写操作的三道闸。过了返回 True；没过已经回过响应，返回 False。
+
+            第三道是关键：表单只能发 text/plain / urlencoded / multipart，
+            发不出 application/json；而跨源发 application/json 会触发预检，
+            我们从不回 CORS 头，浏览器会挡下来。所以「必须是 JSON」
+            等于「必须过预检」，把表单 CSRF 这条路堵死。
+
+            无 body 的写操作（DELETE）允许不带 Content-Type —— 表单也发不出
+            DELETE，这条路上没有 CSRF 面。
+            """
+            if not self._host_ok():
+                self._json(403, {"error": "只接受本机访问"})
+                return False
+            if not self._origin_ok():
+                self._json(403, {"error": "拒绝跨站请求"})
+                return False
+
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                self._json(400, {"error": "Content-Length 不合法"})
+                return False
+
+            if ctype not in ("", "application/json") or (length > 0 and ctype != "application/json"):
+                self._json(415, {"error": "写操作必须用 Content-Type: application/json"})
+                return False
+            return True
 
         def _parts(self) -> tuple[list[str], dict]:
             parsed = urlparse(self.path)
@@ -293,9 +382,26 @@ def serve(
                     pass
             return avatars.avatar_for(key).encode("utf-8"), "image/svg+xml; charset=utf-8"
 
+        def _guard_read(self) -> bool:
+            """读操作也要校验来源。
+
+            DNS rebinding 不只是能改配置 —— 恶意页面可以让自己的域名解析到
+            127.0.0.1，然后在浏览器眼里变成同源，直接把 /api/conversations
+            读走。Host 校验是唯一能识破这一招的地方。
+            """
+            if not self._host_ok():
+                self._json(403, {"error": "只接受本机访问"})
+                return False
+            if not self._origin_ok():
+                self._json(403, {"error": "拒绝跨站请求"})
+                return False
+            return True
+
         # ------------------------------------------------------ GET
 
         def do_GET(self) -> None:
+            if not self._guard_read():
+                return
             parts, query = self._parts()
 
             if not parts:
@@ -376,6 +482,8 @@ def serve(
         # ------------------------------------------------------ POST / PATCH / DELETE
 
         def do_POST(self) -> None:
+            if not self._guard_write():
+                return
             parts, _ = self._parts()
 
             try:
@@ -408,6 +516,8 @@ def serve(
             self._json(404, {"error": "not found"})
 
         def do_PATCH(self) -> None:
+            if not self._guard_write():
+                return
             parts, _ = self._parts()
             try:
                 data = self._body()
@@ -436,6 +546,8 @@ def serve(
             self._json(404, {"error": "not found"})
 
         def do_DELETE(self) -> None:
+            if not self._guard_write():
+                return
             parts, _ = self._parts()
             if len(parts) == 3 and parts[:2] == ["api", "conversations"]:
                 if not store.delete_conversation(parts[2]):
@@ -547,7 +659,8 @@ def serve(
 
             def emit(obj: dict) -> None:
                 try:
-                    self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode("utf-8"))
+                    payload = json.dumps(_scrub(obj), ensure_ascii=False)
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
