@@ -96,12 +96,51 @@ class TestConversations(Base):
         again = store.load_conversation(conv["id"])
         self.assertEqual(again["title"], "还记得我吗")
 
+    def _write_raw(self, cid, title, updated):
+        """直接写文件，绕开 create/save 自动盖时间戳 —— 排序测试需要控制 updated。"""
+        folder = self.cfg.parent / "conversations"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{cid}.json").write_text(
+            json.dumps(
+                {
+                    "id": cid,
+                    "title": title,
+                    "kind": "group",
+                    "members": ["claude"],
+                    "category": "常用",
+                    "created": updated,
+                    "updated": updated,
+                    "turns": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_list_sorted_by_updated(self):
+        self._write_raw("aaa", "老的", 1000.0)
+        self._write_raw("bbb", "新的", 2000.0)
+        self.assertEqual([c["id"] for c in store.list_conversations()], ["bbb", "aaa"])
+
+    def test_tie_broken_deterministically(self):
+        """updated 相同时顺序必须稳定，否则界面每次刷新都会跳。
+
+        Windows 上连续建两个对话很容易落在同一个时钟 tick —— 这不是理论问题，
+        CI 就是这么红的。
+        """
+        self._write_raw("zzz", "同刻 A", 1000.0)
+        self._write_raw("aaa", "同刻 B", 1000.0)
+        first = [c["id"] for c in store.list_conversations()]
+        second = [c["id"] for c in store.list_conversations()]
+        self.assertEqual(first, second, "两次读取顺序不一致")
+        self.assertEqual(first, ["aaa", "zzz"], "时间相同时应按 id 排")
+
+    def test_list_contains_both(self):
         a = store.create_conversation("先", ["claude"])
         b = store.create_conversation("后", ["gpt"])
         listed = store.list_conversations()
-        self.assertEqual(listed[0]["id"], b["id"])
-        self.assertIn(a["id"], [c["id"] for c in listed])
+        self.assertEqual({c["id"] for c in listed}, {a["id"], b["id"]})
+        stamps = [c["updated"] for c in listed]
+        self.assertEqual(stamps, sorted(stamps, reverse=True), "必须按 updated 降序")
 
     def test_list_has_last_snippet(self):
         conv = store.create_conversation("有内容", ["claude"])

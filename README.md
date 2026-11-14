@@ -1,7 +1,7 @@
 # polylogue
 
 [![CI](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml/badge.svg)](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml)
-![tests](https://img.shields.io/badge/tests-231%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-233%20passing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![deps](https://img.shields.io/badge/dependencies-0-success)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -265,7 +265,7 @@ openrouter 余额不够：这次请求按 4096 tokens 预留，账户只够 1599
 python -m unittest discover -s tests -t .
 ```
 
-231 个测试，全部离线（用假上游，不打真实 API）。
+233 个测试，全部离线（用假上游，不打真实 API）。
 
 ## License
 

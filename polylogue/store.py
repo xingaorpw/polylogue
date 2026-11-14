@@ -294,7 +294,9 @@ def list_conversations() -> list[dict]:
                 "last": _last_snippet(data),
             }
         )
-    out.sort(key=lambda c: -c["updated"])
+    # 排序键加 id 做次级比较：连续建两个对话时 updated 可能落在同一 tick，
+    # 只按时间排的话列表顺序会随机跳，每次刷新都不一样。
+    out.sort(key=lambda c: (-c["updated"], c["id"]))
     return out
 
 
