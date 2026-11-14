@@ -14,11 +14,17 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 __all__ = ["Price", "PRICES", "cost_of", "PRICE_TABLE_DATE"]
 
 PRICE_TABLE_DATE = "2026-11"
+
+# 同一型号的版本后缀：-2024-08-06 / -20241022 / -0301 / -v3 / -latest
+_VERSION_SUFFIX = re.compile(
+    r"[-._](?:\d{4}-\d{2}-\d{2}|\d{6,8}|\d{4}|latest|preview|v\d+)$", re.IGNORECASE
+)
 
 PRICES: dict[str, tuple[float, float]] = {
     # 模型短名（或前缀）: (输入 $/M, 输出 $/M)
@@ -100,11 +106,23 @@ def _lookup(model: str) -> Price | None:
 
     if name in PRICES:
         return Price(*PRICES[name])
-    # 前缀匹配：grok-4.6-0301 这种带日期的版本落到 grok-4.6
-    candidates = [k for k in PRICES if name.startswith(k)]
-    if not candidates:
+
+    # 前缀匹配只认「同一型号的版本后缀」：
+    #   gpt-4o-mini-2024-08-06 → gpt-4o-mini   ✓
+    #   claude-sonnet-4-20250514 → claude-sonnet-4  ✓
+    #   o3-mini / o3-pro / grok-4-fast         ✗ 这是**另一个型号**
+    # 套用兄弟型号的价格会差一个数量级（o3-pro 实际比 o3 贵十倍），
+    # 宁可返回 None 让界面显示「未知」，也不要给一个假数字。
+    best: str | None = None
+    for key in PRICES:
+        if not name.startswith(key):
+            continue
+        rest = name[len(key) :]
+        if rest and _VERSION_SUFFIX.match(rest):
+            if best is None or len(key) > len(best):
+                best = key
+    if best is None:
         return None
-    best = max(candidates, key=len)
     return Price(*PRICES[best])
 
 

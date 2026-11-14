@@ -1,7 +1,7 @@
 # polylogue
 
 [![CI](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml/badge.svg)](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml)
-![tests](https://img.shields.io/badge/tests-279%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-350%20passing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![deps](https://img.shields.io/badge/dependencies-0-success)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -315,7 +315,10 @@ polylogue --forget openrouter  # 删掉
   把「逐字保留最近几条」调大。
 - **前端只做了 DOM + 像素级验证**。开发过程中没有视觉通道 —— 能确认的是
   「渲染出来了、明暗两套真的不一样、头像都加载了」，间距、字号、配色这些
-  观感问题得人看一眼。
+  观感问题得人看一眼。0.3.4 这一版改了大量前端交互（流归属、输入法回车、
+  搜索竞态、弹层误关），但**本机 headless 浏览器卡死，这一轮只做了 JS 语法
+  检查和静态契约测试**（元素 id 全部存在、每个绑定的函数名都有定义），
+  没有重新跑一遍渲染截图。交互回归靠 `tests/test_hardening.py::TestFrontendContracts`。
 - **Q 版头像是手写的 SVG，不是官方素材**。用配色和标志性元素区分厂商，
   不是各家的官方形象。
 - **搜索是全文顺序扫描**。对话上百个之后会变慢，没有建索引。

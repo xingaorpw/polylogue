@@ -107,6 +107,17 @@ class App:
         with self.lock:
             return self.cancels.setdefault(cid, threading.Event())
 
+    def forget_cancel(self, cid: str) -> None:
+        """会话被删掉时回收它的停止信号。
+
+        为什么不在每次说完就回收：两个请求可能同时说话，先到的那个说完了
+        就把 Event 摘掉，后到的那个拿的还是旧对象 —— 用户按「停止」时
+        `cancel_for` 会新建一个 Event，正在跑的那个永远收不到信号。
+        所以按会话存活期管理，而不是按请求。
+        """
+        with self.lock:
+            self.cancels.pop(cid, None)
+
 
 def _budget() -> Budget:
     cfg = config.load().get("budget") or {}
@@ -231,6 +242,11 @@ def serve(
         # ------------------------------------------------------ 工具
 
         def _json(self, code: int, obj) -> None:
+            # 头已经发过了就绝不能再写一次 —— 否则会把第二个 HTTP 响应
+            # 塞进已经开始的流里，客户端看到的是一段乱码。
+            # 以前 SSE 中途抛 ValueError 就这么干过一次。
+            if getattr(self, "_sent", False):
+                return
             data = json.dumps(_scrub(obj), ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -238,14 +254,18 @@ def serve(
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
+            self._sent = True
 
         def _bytes(self, code: int, body: bytes, ctype: str) -> None:
+            if getattr(self, "_sent", False):
+                return
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
+            self._sent = True
 
         def _text(self, code: int, body: str, ctype: str) -> None:
             self._bytes(code, body.encode("utf-8"), ctype)
@@ -558,6 +578,7 @@ def serve(
                 if not store.delete_conversation(parts[2]):
                     self._json(404, {"error": "会话不存在"})
                     return
+                app.forget_cancel(parts[2])  # 会话没了，停止信号也别留着
                 self._json(200, {"ok": True})
                 return
             if len(parts) == 3 and parts[:2] == ["api", "contacts"]:
@@ -651,9 +672,10 @@ def serve(
                 self._json(400, {"error": "空消息"})
                 return
 
-            room, providers, skipped = _room_from(conv)
-            if not room.members:
-                self._json(400, {"error": "没有可用模型：" + ("；".join(skipped) or "通讯录为空")})
+            # 这里只做便宜的存在性检查就开流。模型建不起来（key 过期等）
+            # 也要走 SSE 告诉用户「为什么没人回」，而不是一个 400 把话吞掉。
+            if not (conv.get("members") or []):
+                self._json(400, {"error": "这个对话没有成员"})
                 return
 
             self.send_response(200)
@@ -661,45 +683,35 @@ def serve(
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             self.end_headers()
+            self._sent = True  # 从这里开始只能写 SSE，不能再写 HTTP 响应
+
+            # 客户端关掉标签页之后继续跑就是在烧钱。写失败就记一笔，
+            # 下一轮边界让 Session 停 —— 不会打断正在飞的请求。
+            alive = {"yes": True}
 
             def emit(obj: dict) -> None:
+                if not alive["yes"]:
+                    return
                 try:
                     payload = json.dumps(_scrub(obj), ensure_ascii=False)
                     self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                    alive["yes"] = False
 
-            conv.setdefault("turns", []).append(
-                {"speaker": "你", "role": "user", "content": text, "ts": store._now()}
-            )
-
-            new_turns: list[dict] = []
-
-            def on_turn(turn) -> None:
-                record = {
-                    "speaker": turn.speaker,
-                    "speaker_id": _name_map(conv.get("members") or []).get(turn.speaker, ""),
-                    "role": "assistant",
-                    "content": turn.content,
-                    "tokens": turn.usage.total,
-                    "cost": turn.cost,
-                    "error": turn.error,
-                    "ts": store._now(),
-                }
-                new_turns.append(record)
-                if turn.error:
-                    emit({"type": "error", "speaker": turn.speaker, "message": turn.error})
-                else:
-                    emit(
-                        {
-                            "type": "turn",
-                            "speaker": turn.speaker,
-                            "content": turn.content,
-                            "tokens": turn.usage.total,
-                            "cost": turn.cost,
-                        }
-                    )
+            def finish(stop_message: str | None, conv_now: dict | None) -> None:
+                summary = _summarize(conv_now) if conv_now else {"tokens": 0, "cost": 0.0}
+                emit(
+                    {
+                        "type": "done",
+                        "stop": stop_message,
+                        "tokens": summary.get("tokens", 0),
+                        "cost": summary.get("cost", 0.0),
+                        "cost_unknown": summary.get("cost_unknown", False),
+                        "compression": (conv_now or {}).get("compression"),
+                        "conversation": summary,
+                    }
+                )
 
             cancel = app.cancel_for(cid)
             cancel.clear()
@@ -707,10 +719,84 @@ def serve(
             acquired = app.run_lock.acquire(timeout=180)
             if not acquired:
                 emit({"type": "error", "speaker": "system", "message": "另一个会话正在会商，等待超时"})
-                emit({"type": "done", "stop": None, "tokens": 0, "cost": 0.0})
+                finish(None, None)
                 return
 
             try:
+                # 拿到锁之后**重新读一遍**。两个请求同时说话时，先到的那个已经
+                # 写过盘了；还拿着开头读到的旧副本去保存，会把对方的发言整段覆盖掉。
+                conv = store.load_conversation(cid)
+                if not conv:
+                    emit({"type": "error", "speaker": "system", "message": "会话已被删除"})
+                    finish(None, None)
+                    return
+
+                # 用户说的话先落盘再跑模型。模型挂了、内部异常、进程被杀，
+                # 都不该让用户发现自己刚打的字没了。
+                conv.setdefault("turns", []).append(
+                    {"speaker": "你", "role": "user", "content": text, "ts": store._now()}
+                )
+                store.save_conversation(conv)
+
+                # Room 不接受空成员列表（一个没有模型的房间没有意义）。
+                # 但这里必须转成 SSE 事件 —— 头已经发了，抛出去会变成
+                # 第二个 HTTP 响应塞进流里。
+                try:
+                    room, providers, skipped = _room_from(conv)
+                except ValueError as exc:
+                    emit({"type": "error", "speaker": "system", "message": str(exc)})
+                    finish(None, store.load_conversation(cid))
+                    return
+
+                name_to_id = _name_map(conv.get("members") or [])
+
+                if not room.members:
+                    detail = "；".join(skipped) or "通讯录为空"
+                    emit({"type": "error", "speaker": "system", "message": f"没有可用模型：{detail}"})
+                    finish(None, store.load_conversation(cid))
+                    return
+
+                new_turns: list[dict] = []
+
+                def on_turn(turn) -> None:
+                    record = {
+                        "speaker": turn.speaker,
+                        "speaker_id": name_to_id.get(turn.speaker, ""),
+                        "role": "assistant",
+                        "content": turn.content,
+                        "tokens": turn.usage.total,
+                        "cost": turn.cost,
+                        "error": turn.error,
+                        "ts": store._now(),
+                    }
+                    new_turns.append(record)
+                    if turn.error:
+                        emit({"type": "error", "speaker": turn.speaker, "message": turn.error})
+                    else:
+                        emit(
+                            {
+                                "type": "turn",
+                                "speaker": turn.speaker,
+                                "content": turn.content,
+                                "tokens": turn.usage.total,
+                                "cost": turn.cost,
+                            }
+                        )
+
+                def persist() -> None:
+                    """把已经产生的发言写下去。
+
+                    中途失败也要调用 —— 屏幕上已经显示出来的内容必须和磁盘一致，
+                    否则刷新一下回复就没了。
+                    """
+                    if not new_turns:
+                        return
+                    fresh = store.load_conversation(cid) or conv
+                    fresh.setdefault("turns", []).extend(new_turns)
+                    fresh["compression"] = room.last_compression
+                    store.save_conversation(fresh)
+                    new_turns.clear()
+
                 cfg = config.load().get("context") or {}
                 enabled = cfg.get("enabled", True)
                 session = Session(
@@ -718,32 +804,22 @@ def serve(
                     providers,
                     budget=budget or _budget(),
                     on_turn=on_turn,
-                    should_stop=cancel.is_set,
+                    should_stop=lambda: cancel.is_set() or not alive["yes"],
                     keep_recent=(cfg.get("keep_recent", 8) if enabled else None),
                     context_budget=(cfg.get("budget_tokens", 6000) if enabled else None),
                 )
                 try:
                     result = session.say(text)
                 except Exception as exc:  # noqa: BLE001 - 任何异常都要让前端看到
+                    persist()
                     emit({"type": "error", "speaker": "system", "message": f"内部错误：{exc}"})
-                    emit({"type": "done", "stop": None, "tokens": 0, "cost": 0.0})
+                    finish(None, store.load_conversation(cid))
                     return
 
-                conv["turns"].extend(new_turns)
-                conv["compression"] = room.last_compression
-                store.save_conversation(conv)
-
-                summary = _summarize(conv)
-                emit(
-                    {
-                        "type": "done",
-                        "stop": result.stop.message if result.stop else None,
-                        "tokens": summary["tokens"],
-                        "cost": summary["cost"],
-                        "cost_unknown": summary["cost_unknown"],
-                        "compression": room.last_compression,
-                        "conversation": _summarize(conv),
-                    }
+                persist()
+                finish(
+                    result.stop.message if result.stop else None,
+                    store.load_conversation(cid),
                 )
             finally:
                 app.run_lock.release()

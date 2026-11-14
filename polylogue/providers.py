@@ -7,6 +7,7 @@ Grok、DeepSeek、OpenAI、OpenRouter、Ollama 都是 OpenAI 兼容接口，
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -14,7 +15,19 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+# 出站响应的读取上限。入站方向 web.py 有 2MB 闸门，出站方向以前没有 ——
+# base_url 指错（指到静态文件站、反代默认页）就会把一整页 HTML 读进内存。
+MAX_RESPONSE = 8 * 1024 * 1024
+
+
+def _redact(text: str) -> str:
+    """脱敏。延迟导入：credentials 反向依赖本模块的 PRESETS，顶层导入会成环。"""
+    from .credentials import redact
+
+    return redact(text)
 
 __all__ = [
     "Message",
@@ -109,29 +122,51 @@ class Provider:
 
     name: str = "provider"
     model: str = ""
+    # 本地推理（ollama / lmstudio / 自建回环端点）成本是真的 0，
+    # 不是「查不到价格」。两者混起来会让成本上限把本地模型当风险。
+    free: bool = False
 
     def complete(self, messages: list[Message], system: str | None = None) -> Reply:
         raise NotImplementedError
 
     def _post(self, url: str, payload: dict, headers: dict[str, str], timeout: float = 120.0) -> dict:
         body = json.dumps(payload).encode("utf-8")
-        req = Request(url, data=body, headers=headers, method="POST")
+        try:
+            req = Request(url, data=body, headers=headers, method="POST")
+        except ValueError as exc:
+            # URL 里带控制字符时，异常文本会把完整 URL 打出来 ——
+            # Gemini 的 key 就在查询串里，所以这里只能给一句不带 URL 的话。
+            raise ProviderError(
+                f"{self.name} 请求地址不合法：检查 base_url 和 key 里有没有非法字符"
+            ) from exc
+
         try:
             with urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                raw = resp.read(MAX_RESPONSE + 1)
+            if len(raw) > MAX_RESPONSE:
+                raise ProviderError(
+                    f"{self.name} 返回内容超过 {MAX_RESPONSE // 1024 // 1024} MB，"
+                    "检查 base_url 是否指向了正确的 API 地址"
+                )
+            return json.loads(raw.decode("utf-8"))
         except HTTPError as exc:
             detail = ""
             try:
                 detail = exc.read().decode("utf-8", "replace")[:400]
             except Exception:  # noqa: BLE001 - 读错误体失败不该掩盖原始错误
                 pass
-            raise ProviderError(_explain(self.name, exc.code, detail)) from exc
+            # 上游/代理常把请求信息回显在错误体里（含 key），必须脱敏
+            raise ProviderError(_redact(_explain(self.name, exc.code, detail))) from exc
+        except ProviderError:
+            raise
         except URLError as exc:
-            raise ProviderError(f"{self.name} 连不上：{exc.reason}") from exc
+            raise ProviderError(_redact(f"{self.name} 连不上：{exc.reason}")) from exc
         except (TimeoutError, OSError) as exc:
-            raise ProviderError(f"{self.name} 请求失败：{exc}") from exc
-        except ValueError as exc:
-            raise ProviderError(f"{self.name} 返回的不是 JSON：{exc}") from exc
+            raise ProviderError(_redact(f"{self.name} 请求失败：{exc}")) from exc
+        except (http.client.HTTPException, ValueError) as exc:
+            # InvalidURL 是 HTTPException，不是 ValueError；两者都可能是
+            # 「URL 不合法」或「返回的不是 JSON」，分开报，且都要脱敏。
+            raise ProviderError(_redact(f"{self.name} 返回的不是 JSON：{exc}")) from exc
 
 
 class OpenAICompatProvider(Provider):
@@ -156,6 +191,19 @@ class OpenAICompatProvider(Provider):
         # 是因为它替你估了一个你付不起的数。
         self.max_tokens = max_tokens
 
+    # OpenAI 的推理模型（o1/o3/o4/gpt-5）不认 max_tokens
+    _REASONING_RE = re.compile(r"^(o\d|gpt-5)", re.IGNORECASE)
+
+    def _token_param(self) -> str:
+        """推理模型要发 max_completion_tokens，其余发 max_tokens。
+
+        只在直连 openai 时切换：OpenRouter 自己会归一化，别的 OpenAI
+        兼容服务多半只认 max_tokens。
+        """
+        if self.name == "openai" and self._REASONING_RE.match(self.model or ""):
+            return "max_completion_tokens"
+        return "max_tokens"
+
     def complete(self, messages: list[Message], system: str | None = None) -> Reply:
         payload_messages: list[dict[str, str]] = []
         if system:
@@ -164,14 +212,26 @@ class OpenAICompatProvider(Provider):
 
         payload = {"model": self.model, "messages": payload_messages}
         if self.max_tokens:
-            payload["max_tokens"] = self.max_tokens
+            payload[self._token_param()] = self.max_tokens
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
 
         started = time.monotonic()
-        data = self._post(f"{self.base_url}/chat/completions", payload, headers, self.timeout)
+        try:
+            data = self._post(f"{self.base_url}/chat/completions", payload, headers, self.timeout)
+        except ProviderError as exc:
+            # 参数名猜错了（未知的新推理模型）：按上游提示换一个再试一次。
+            # 只重试一次，不会无限循环。
+            hint = str(exc)
+            if "max_completion_tokens" not in hint and "max_tokens" not in hint:
+                raise
+            alt = "max_completion_tokens" if "max_tokens" in payload else "max_tokens"
+            payload.pop("max_tokens", None)
+            payload.pop("max_completion_tokens", None)
+            payload[alt] = self.max_tokens
+            data = self._post(f"{self.base_url}/chat/completions", payload, headers, self.timeout)
         latency = time.monotonic() - started
 
         try:
@@ -246,9 +306,24 @@ class GeminiProvider(Provider):
         meta = data.get("usageMetadata") or {}
         usage = Usage(
             prompt_tokens=int(meta.get("promptTokenCount") or 0),
-            completion_tokens=int(meta.get("candidatesTokenCount") or 0),
+            # 2.5 系列默认开思考，思考 token 按**输出**计费。
+            # 只读 candidatesTokenCount 会把一大块成本凭空抹掉
+            # （实测 1500 个思考 token 对 200 个正文 token）。
+            completion_tokens=int(meta.get("candidatesTokenCount") or 0)
+            + int(meta.get("thoughtsTokenCount") or 0),
         )
-        return Reply(text=text.strip(), model=self.model, usage=usage, latency_s=latency)
+
+        text = text.strip()
+        if not text:
+            # 正文为空时不能返回空串 —— 那会变成转录里的一个空气泡，
+            # 还会让收敛判断以为「这一轮没有新信息」而误停。
+            finish = "?"
+            try:
+                finish = data["candidates"][0].get("finishReason") or "?"
+            except (KeyError, IndexError, TypeError):
+                pass
+            raise ProviderError(f"gemini 返回了空内容（finishReason={finish}）")
+        return Reply(text=text, model=self.model, usage=usage, latency_s=latency)
 
 
 class AnthropicProvider(Provider):
@@ -271,11 +346,25 @@ class AnthropicProvider(Provider):
         self.timeout = timeout
 
     def complete(self, messages: list[Message], system: str | None = None) -> Reply:
-        payload_messages = []
+        # Anthropic 要求 user / assistant **严格交替**。群里别人的发言
+        # 按 user 角色喂过来，连续几条就是连续的 user，真实接口会
+        # 400 "roles must alternate"。所以相邻同角色必须合并成一条。
+        payload_messages: list[dict[str, Any]] = []
         for m in messages:
-            # Anthropic 只认 user / assistant
             role = "assistant" if m.role == "assistant" else "user"
-            payload_messages.append({"role": role, "content": m.content})
+            text = m.content or ""
+            if not text.strip():
+                continue
+            if payload_messages and payload_messages[-1]["role"] == role:
+                payload_messages[-1]["content"] += "\n\n" + text
+            else:
+                payload_messages.append({"role": role, "content": text})
+
+        # 第一条必须是 user（模型先说的情况只在做 prefill 时合法）
+        if payload_messages and payload_messages[0]["role"] == "assistant":
+            payload_messages.insert(0, {"role": "user", "content": "（继续上面的对话）"})
+        if not payload_messages:
+            raise ProviderError("claude 没有可发送的内容（历史为空）")
 
         payload: dict[str, Any] = {
             "model": self.model,
@@ -305,7 +394,17 @@ class AnthropicProvider(Provider):
             prompt_tokens=int(raw_usage.get("input_tokens") or 0),
             completion_tokens=int(raw_usage.get("output_tokens") or 0),
         )
-        return Reply(text=text.strip(), model=self.model, usage=usage, latency_s=latency)
+
+        text = text.strip()
+        if not text:
+            # 只返回 thinking / tool_use 块时正文是空的。空串进转录会变成
+            # 空气泡，且下一轮这条空 assistant 还会让接口 400。
+            stop = data.get("stop_reason") or "?"
+            kinds = ",".join(str(b.get("type")) for b in blocks if isinstance(b, dict)) or "无"
+            raise ProviderError(
+                f"claude 返回了空内容（stop_reason={stop}，内容块={kinds}）"
+            )
+        return Reply(text=text, model=self.model, usage=usage, latency_s=latency)
 
 
 class MockProvider(Provider):
@@ -453,6 +552,15 @@ def resolve_name(name: str) -> str:
     return ALIASES.get(key, key)
 
 
+def _is_local(base_url: str) -> bool:
+    """回环端点 = 自己的机器在跑，成本是真的 0，不是「查不到价格」。"""
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
 def build_provider(
     name: str,
     *,
@@ -469,9 +577,11 @@ def build_provider(
     if preset is None:
         if base_url:
             token = api_key or os.environ.get("LLM_API_KEY", "")
-            return OpenAICompatProvider(
+            provider = OpenAICompatProvider(
                 name=key, base_url=base_url, api_key=token or "none", model=model or ""
             )
+            provider.free = _is_local(base_url)
+            return provider
         known = ", ".join(sorted(PRESETS))
         raise ProviderError(f"不认识的 provider：{name}。可用：{known}；或用 --provider 名字=URL 自定义")
 
@@ -491,10 +601,13 @@ def build_provider(
     if kind == "gemini":
         return GeminiProvider(api_key=token, model=resolved_model)
 
-    return OpenAICompatProvider(
+    real_url = base_url or preset["base_url"]
+    provider = OpenAICompatProvider(
         name=key,
-        base_url=base_url or preset["base_url"],
+        base_url=real_url,
         api_key=token or "none",
         model=resolved_model,
         max_tokens=max_tokens,
     )
+    provider.free = _is_local(real_url)
+    return provider

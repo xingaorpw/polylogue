@@ -109,19 +109,63 @@ def resolve_members(explicit: list[str] | None = None) -> tuple[list[dict], str]
 
     cfg = config.load()
     saved = cfg.get("members") or []
+    # 旧格式可能是 ["claude"] 这种字符串数组：原样返回会让下游
+    # item["name"] 直接 TypeError，所以先归一成 dict
+    saved = [_as_member(m) for m in saved if isinstance(m, (dict, str))]
+    saved = [m for m in saved if m]
     if saved:
         return saved, "上次保存的配置"
 
     keys = discover()
     if "openrouter" in keys:
-        # 一个 key 覆盖所有厂商，直接上「省钱」档
-        return MODEL_PRESETS["省钱"], "自动（检测到 OpenRouter 凭据）"
+        # 一个 key 覆盖所有厂商，直接上「省钱」档。
+        # 必须深拷贝：返回的是模块级常量，调用方 append 一个成员
+        # 就会污染整个进程的预设（后续 detect() 也会带着它）。
+        return [dict(m) for m in MODEL_PRESETS["省钱"]], "自动（检测到 OpenRouter 凭据）"
 
     for provider in ("openai", "claude", "gemini", "deepseek", "grok"):
         if provider in keys and provider in SINGLE_PROVIDER_DEFAULTS:
-            return SINGLE_PROVIDER_DEFAULTS[provider], f"自动（检测到 {provider} 凭据）"
+            return [dict(m) for m in SINGLE_PROVIDER_DEFAULTS[provider]], f"自动（检测到 {provider} 凭据）"
+
+    # 只认这五家的话，装了 qwen / kimi / glm / groq 的 key 会得到
+    # 「没有可用凭据」—— 明明检测到了却用不了。这里按 PRESETS 现场拼。
+    for provider in sorted(keys):
+        preset = PRESETS.get(provider)
+        if not preset:
+            continue
+        # 本地端点（ollama/lmstudio）没有 key，不该出现在「检测到凭据」里
+        if not preset.get("env"):
+            continue
+        model = preset.get("model")
+        if not model:
+            continue
+        return (
+            [{"name": provider, "provider": provider, "model": model}],
+            f"自动（检测到 {provider} 凭据）",
+        )
 
     return [], "没有可用凭据，需要引导"
+
+
+def _as_member(item) -> dict | None:
+    """把成员归一成 {name, provider, model}。认不出就返回 None。"""
+    if isinstance(item, str):
+        name = item.strip()
+        if not name:
+            return None
+        return {"name": name, "provider": resolve_name(name), "model": None}
+    if not isinstance(item, dict):
+        return None
+    name = item.get("name") or item.get("provider")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    provider = item.get("provider") or name
+    model = item.get("model")
+    return {
+        "name": name,
+        "provider": resolve_name(provider) if isinstance(provider, str) else name,
+        "model": model if isinstance(model, str) and model else None,
+    }
 
 
 def build_all(
@@ -138,13 +182,23 @@ def build_all(
     active: list[str] = []
     skipped: list[str] = []
 
-    for item in members:
-        name = item.get("name") or item.get("provider")
-        provider = item.get("provider") or name
-        model = item.get("model") or models.get(name)
+    for raw in members:
+        item = _as_member(raw)
+        if not item:
+            skipped.append(f"{raw!r}：成员格式不对，已忽略")
+            continue
+        name = item["name"]
+        # 别名（anthropic/xai/google/gpt）要归一到规范名再查 key ——
+        # 否则 keys.get("anthropic") 永远是 None，成员会被静默跳过
+        provider = item["provider"] or name
+        canonical = resolve_name(provider)
+        model = item["model"] or models.get(name) or models.get(canonical)
 
-        kwargs = {"model": model, "base_url": custom.get(provider) or custom.get(name)}
-        key = keys.get(provider)
+        kwargs = {
+            "model": model,
+            "base_url": custom.get(canonical) or custom.get(provider) or custom.get(name),
+        }
+        key = keys.get(canonical) or keys.get(provider)
         if key:
             kwargs["api_key"] = key
 

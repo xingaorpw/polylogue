@@ -497,7 +497,17 @@ async function refresh(info){
   const pick = S.cur && S.convs.find(c=>c.id===S.cur) ? S.cur
              : (S.convs.length ? S.convs[0].id : null);
   if(pick) await openConv(pick, true);
-  else renderEmpty();
+  else {
+    // 一个会话都不剩：标题、成员头像、花费面板都要清掉，
+    // 否则窗口里还挂着刚被删掉的那个对话的标题和数字
+    S.cur = null;
+    S.conv = null;
+    setTitle("还没有对话");
+    renderMemAv();
+    renderChips();
+    paint({});
+    renderEmpty();
+  }
 }
 
 /* ───────── 左栏 ───────── */
@@ -630,18 +640,42 @@ function contactItem(c){
 }
 
 /* ───────── 打开会话 ───────── */
+function setTitle(text){
+  // 行内改名时 #ttl 已经被输入框替换掉了，这时 $("ttl") 是 null。
+  // 直接赋值会 TypeError，把后面的渲染全带崩。
+  const el = $("ttl");
+  if(!el) return;
+  el.textContent = text;
+}
+
 async function openConv(id, keepScroll){
+  if(!id) return;
   S.hits = null;
+  S.q = "";
+  const qBox = $("q"); if(qBox) qBox.value = "";
   S.cur = id;
-  S.conv = await api("/api/conversations/" + id);
-  $("ttl").textContent = S.conv.title;
-  $("ttl").className = "ttl";
+  let conv;
+  try{
+    conv = await api("/api/conversations/" + id);
+  }catch(e){
+    // 会话在别处被删掉了：别停在一个不存在的会话上
+    S.cur = null; S.conv = null;
+    await refresh();
+    return;
+  }
+  // 请求期间用户又切到别的会话了 —— 这次结果丢掉，否则会把
+  // A 的转录画到 B 的窗口里（还会让 B 的花费面板显示 A 的数字）
+  if(S.cur !== id) return;
+  S.conv = conv;
+  setTitle(conv.title || "未命名");
+  const ttl = $("ttl");
+  if(ttl) ttl.className = "ttl";
   renderList();
   renderMemAv();
   renderChips();
-  renderLog(S.conv.turns);
-  paint(S.conv);
-  $("input").focus();
+  renderLog(conv.turns);
+  paint(conv);
+  if(!keepScroll) $("input").focus();
 }
 
 function renderMemAv(){
@@ -706,8 +740,10 @@ function msgRow(t){
 function appendRow(t){
   const log = $("log");
   const e = log.querySelector(".bigempty"); if(e) e.remove();
-  log.appendChild(msgRow(t));
-  log.scrollTop = log.scrollHeight;
+  const row = msgRow(t);
+  log.appendChild(row);
+  scrollLog();
+  return row;   // 调用方可能要撤销这一行（比如请求整个失败）
 }
 
 function renderEmpty(){
@@ -787,22 +823,41 @@ function paintMembers(d){
 }
 
 /* ───────── 发言 ───────── */
+function scrollLog(){
+  // 只在本来就贴着底部时才自动滚。用户往上翻看历史时被拽回底部
+  // 是最让人恼火的交互之一。
+  const log = $("log");
+  if(log.scrollHeight - log.scrollTop - log.clientHeight < 120){
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
 async function say(){
   const t = $("input").value.trim();
   if(!t || S.running || !S.cur) return;
+  const convId = S.cur;
   $("input").value = "";
-  appendRow({role:"user", content:t, speaker:"你"});
+  const mine = appendRow({role:"user", content:t, speaker:"你"});
   setRunning(true);
 
   const pending = document.createElement("div");
   pending.className = "note";
   pending.innerHTML = '<div class="txt">等待回应…</div>';
   $("log").appendChild(pending);
-  $("log").scrollTop = $("log").scrollHeight;
+  scrollLog();
+
+  const ctrl = new AbortController();
+  const run = {id: convId, ctrl};
+  S.run = run;
+  // 这条流是不是还该往当前窗口里画。用户中途切走以后，
+  // 后续事件要丢掉 —— 否则 A 的回复会出现在 B 的对话里。
+  const here = () => S.run === run && S.cur === convId;
+  let sawDone = false;
 
   try{
-    const r = await fetch(`/api/conversations/${S.cur}/say`, {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:t})
+    const r = await fetch(`/api/conversations/${convId}/say`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({text:t}), signal: ctrl.signal
     });
     if(!r.ok){
       const e = await r.json().catch(()=>({}));
@@ -822,11 +877,15 @@ async function say(){
         let ev; try{ ev = JSON.parse(chunk.slice(6)); }catch{ continue; }
 
         if(ev.type === "turn" || ev.type === "error"){
+          if(!here()) continue;
           if(first){ pending.remove(); first = false; }
           appendRow({role:"assistant", speaker:ev.speaker, content:ev.content,
                      error: ev.type==="error" ? ev.message : null,
                      tokens:ev.tokens, speaker_id: (S.conv&&S.conv.names||{})[ev.speaker]});
+          scrollLog();
         } else if(ev.type === "done"){
+          sawDone = true;
+          if(!here()) continue;
           if(first){ pending.remove(); first = false; }
           if(ev.conversation){ S.conv = Object.assign({}, S.conv, ev.conversation); }
           paint({tokens:ev.tokens, cost:ev.cost, cost_unknown:ev.cost_unknown,
@@ -836,19 +895,49 @@ async function say(){
             n.className = "note";
             n.innerHTML = '<div class="txt">— ' + esc(ev.stop) + "</div>";
             $("log").appendChild(n);
-            $("log").scrollTop = $("log").scrollHeight;
+            scrollLog();
           }
         }
       }
     }
+    // 服务端没发 done 就断流（进程被杀、代理超时）：不能就这么停着
+    if(!sawDone && here()){
+      pending.remove();
+      appendRow({role:"assistant", speaker:"system",
+        content:"连接中断，这一轮可能没存全。刷新一下看看实际存了什么。",
+        error:"连接中断"});
+    }
   }catch(e){
     pending.remove();
+    // 用户主动中断 / 已经切走：不算失败，别弹红条，也别把文字塞回去
+    if(e.name === "AbortError" || !here()) return;
+    // 请求整个失败（400/500/网络断开）时，服务端并没有这条消息。
+    // 把乐观插入的那一行撤掉、把文字放回输入框，让界面和磁盘一致 ——
+    // 否则用户刷新一下，自己刚说的话就凭空消失了。
+    if(mine) mine.remove();
+    if(!$("input").value) $("input").value = t;
     appendRow({role:"assistant", speaker:"system", content:"请求失败："+e.message, error:e.message});
   }finally{
+    if(S.run === run) S.run = null;
     setRunning(false);
     $("input").focus();
-    refresh();
+    // 只刷新左栏，不重画对话流 —— 重画会把上面刚追加的错误气泡抹掉，
+    // 用户看到的就只剩「我发的消息没了」
+    await refreshQuiet();
   }
+}
+
+async function refreshQuiet(){
+  try{
+    const info = await api("/api/info");
+    S.info = info;
+    S.contacts = info.contacts || [];
+    S.cats = info.categories || [];
+    S.convs = info.conversations || [];
+    renderList();
+    const c = S.cur && S.convs.find(x=>x.id===S.cur);
+    if(c) paint(c);
+  }catch(e){ /* 左栏更新失败不该影响正在看的对话 */ }
 }
 
 function setRunning(on){
@@ -856,13 +945,21 @@ function setRunning(on){
   $("btnSend").style.display = on ? "none" : "";
   $("btnStop").style.display = on ? "" : "none";
   $("btnSend").disabled = on;
+  // 每次开始/结束都复位停止按钮：上一轮请求失败后它可能还是 disabled
+  $("btnStop").disabled = false;
 }
 
 async function stopRun(){
   if(!S.cur) return;
-  $("btnStop").disabled = true;
-  await api(`/api/conversations/${S.cur}/stop`, {method:"POST"});
-  $("btnStop").disabled = false;
+  const btn = $("btnStop");
+  btn.disabled = true;
+  try{
+    await api(`/api/conversations/${S.cur}/stop`, {method:"POST"});
+  }catch(e){
+    // 已经停了、或者网络断了：按钮不能永久卡在 disabled
+  }finally{
+    btn.disabled = false;
+  }
 }
 
 /* ───────── 会话操作 ───────── */
@@ -881,14 +978,16 @@ async function renameConv(c){
   const title = t.trim();
   if(!title || title === c.title) return;
   await patch("/api/conversations/" + c.id, {title});
-  if(S.cur === c.id) $("ttl").textContent = title;
+  if(S.cur === c.id) setTitle(title);
   await refresh();
 }
 
 async function deleteConv(c){
   if(!confirm(`删除「${c.title}」？聊天记录会一起没掉。`)) return;
   await del("/api/conversations/" + c.id);
-  if(S.cur === c.id) S.cur = null;
+  // 删的正好是当前会话：把标题和转录一起清掉，否则窗口里还留着
+  // 已经不存在的对话，点发送会 404
+  if(S.cur === c.id){ S.cur = null; S.conv = null; }
   await refresh();
 }
 
@@ -913,6 +1012,7 @@ async function renameInline(){
   };
   input.onblur = () => finish(true);
   input.onkeydown = e => {
+    if(e.isComposing || e.keyCode === 229) return;
     if(e.key === "Enter"){ e.preventDefault(); input.blur(); }
     if(e.key === "Escape"){ input.onblur = null; finish(false); }
   };
@@ -941,6 +1041,7 @@ function pickAvatar(contact){
 
 /* ───────── 搜索 ───────── */
 let qTimer = null;
+let qSeq = 0;
 function onSearch(){
   clearTimeout(qTimer);
   const q = $("q").value.trim();
@@ -950,22 +1051,34 @@ function onSearch(){
 }
 
 async function doSearch(){
+  const q = S.q;
+  const seq = ++qSeq;
   try{
-    const d = await api("/api/search?q=" + encodeURIComponent(S.q));
+    const d = await api("/api/search?q=" + encodeURIComponent(q));
+    // 慢请求回来时用户可能已经改了词或清空了搜索框 ——
+    // 丢掉过期结果，否则会用旧词的结果覆盖新词的
+    if(seq !== qSeq || !S.q) return;
     S.hits = d.hits || [];
     renderHits();
-  }catch(e){ S.hits = []; renderHits(); }
+  }catch(e){
+    if(seq !== qSeq || !S.q) return;
+    S.hits = [];
+    renderHits();
+  }
 }
 
 function renderHits(){
   const log = $("log");
   log.innerHTML = "";
+  // 清空搜索框之后不能继续画结果：S.q 为空时下面拼出的正则是 "()"，
+  // 会把每个字符之间都插一个 <mark>，整页变成高亮碎片
+  if(!S.q){ if(S.conv) renderLog(S.conv.turns); else renderEmpty(); return; }
   const head = document.createElement("div");
   head.className = "hithead";
-  head.textContent = S.q ? `「${S.q}」找到 ${S.hits.length} 处` : "";
+  head.textContent = `「${S.q}」找到 ${(S.hits||[]).length} 处`;
   log.appendChild(head);
 
-  if(!S.hits.length){
+  if(!S.hits || !S.hits.length){
     const e = document.createElement("div");
     e.className = "bigempty";
     e.innerHTML = '<div class="h">没有找到</div><div>换个词试试</div>';
@@ -973,11 +1086,28 @@ function renderHits(){
     return;
   }
   const q = S.q.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  let re = null;
+  try{ re = q ? new RegExp("("+q+")","gi") : null; }catch(e){ re = null; }
   for(const h of S.hits){
     const el = document.createElement("div");
     el.className = "hit";
+    // 先转义再高亮：在已经转义过的文本上匹配原始词，含 & < > 的
+    // 查询会匹配不上（甚至把实体拆坏）。这里对 snippet 的原文匹配
+    // 只在能找到时才高亮，找不到就原样显示。
+    let body = esc(h.snippet);
+    if(re){
+      try{
+        const raw = String(h.snippet || "");
+        if(re.test(raw)){
+          re.lastIndex = 0;
+          // 用分段拼接，避免在转义后的实体中间插入标签
+          const parts = raw.split(re);
+          body = parts.map((p,i)=> i%2 ? "<mark>"+esc(p)+"</mark>" : esc(p)).join("");
+        }
+      }catch(e){ body = esc(h.snippet); }
+    }
     el.innerHTML = `<div class="t">${esc(h.title)}<span class="w">${esc(h.where)}</span></div>
-      <div class="s">${esc(h.snippet).replace(new RegExp("("+q+")","gi"),"<mark>$1</mark>")}</div>`;
+      <div class="s">${body}</div>`;
     el.onclick = () => { $("q").value = ""; S.q=""; S.hits=null; openConv(h.conversation); };
     log.appendChild(el);
   }
@@ -990,7 +1120,14 @@ document.querySelectorAll("[data-close]").forEach(b=>{
   b.onclick = () => closeModal(b.dataset.close);
 });
 document.querySelectorAll(".modal").forEach(m=>{
-  m.onclick = e => { if(e.target === m) m.classList.remove("open"); };
+  // 用 mousedown 记录起点：在输入框里按下鼠标、拖到遮罩上松手
+  // 会触发 click 且 target 是遮罩 —— 那会把用户填了一半的表单关掉
+  let downOnBackdrop = false;
+  m.addEventListener("mousedown", e => { downOnBackdrop = (e.target === m); });
+  m.addEventListener("click", e => {
+    if(e.target === m && downOnBackdrop) m.classList.remove("open");
+    downOnBackdrop = false;
+  });
 });
 
 let pickSel = new Set();
@@ -1048,7 +1185,7 @@ function showOnboarding(){
       <div style="flex:1;font-size:13px">检测到 <b>${esc(p.name)}</b> 的 key
         <div style="color:var(--dim);font-size:11px">${esc(p.masked)} · ${esc(p.source||"本机")}</div></div>
       <button class="btn" style="font-size:12px;padding:5px 11px">就用这个</button>`;
-    d.querySelector("button").onclick = () => submitOnb({preset:"省钱"});
+    d.querySelector("button").onclick = () => submitOnb({preset:"省钱", provider:p.name});
     box.appendChild(d);
   }
   openModal("mOnb");
@@ -1180,6 +1317,9 @@ $("onbGo").onclick = () => {
 };
 
 $("input").addEventListener("keydown", e => {
+  // 中文输入法选词时按回车是「确认候选词」，不是「发送」。
+  // 不判断的话每打一个词就发出去一次。
+  if(e.isComposing || e.keyCode === 229) return;
   if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); say(); }
 });
 document.addEventListener("keydown", e => {

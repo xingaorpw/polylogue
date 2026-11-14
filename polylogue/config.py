@@ -14,7 +14,15 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
+import uuid
 from pathlib import Path
+
+# 进程内串行化读-改-写。Web 是 ThreadingHTTPServer，两个请求同时改
+# 配置时各自拿到旧快照再写回，后写的会覆盖先写的（实测 90 次并发
+# 新增只留下 17 个）。
+_WRITE_LOCK = threading.RLock()
 
 __all__ = [
     "CONFIG_PATH",
@@ -90,16 +98,39 @@ def write_json_atomic(path: Path, data: dict) -> None:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.flush()
+    # 临时文件名必须唯一。以前是固定的 `<名字>.tmp`，两个线程同时写
+    # 同一个文件时会互相删/覆盖对方的临时文件（Windows 上直接
+    # PermissionError），失败方的写入静默丢失。
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())  # 落盘再替换，断电也不会留半个文件
+            except OSError:
+                pass
+        _replace_with_retry(tmp, path)
+    except OSError:
         try:
-            os.fsync(f.fileno())  # 落盘再替换，断电也不会留半个文件
+            tmp.unlink()
         except OSError:
             pass
-    os.replace(tmp, path)
+        raise
     harden(path)
+
+
+def _replace_with_retry(src: Path, dst: Path, attempts: int = 12) -> None:
+    """替换目标文件。Windows 上目标正被读时 os.replace 会抛 PermissionError
+    （WinError 5/32），通常几十毫秒就消失 —— 短重试比直接失败好。"""
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.02 * (i + 1))
 
 
 def load() -> dict:
@@ -120,9 +151,11 @@ def save(data: dict) -> None:
 
 
 def update(**changes) -> dict:
-    data = _deep_merge(load(), changes)
-    save(data)
-    return data
+    # 读-改-写要串行：两个请求同时改设置时，后写的会覆盖先写的
+    with _WRITE_LOCK:
+        data = _deep_merge(load(), changes)
+        save(data)
+        return data
 
 
 def reset() -> None:

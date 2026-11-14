@@ -16,11 +16,23 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
 
 from . import config
+
+# 通讯录/分类的读-改-写要串行，否则两个请求同时加联系人会互相覆盖
+_STATE_LOCK = threading.RLock()
+
+# Windows 保留设备名：这些名字当文件名会炸（NUL 写出来是黑洞，
+# 带 .tmp 再 replace 会 FileExistsError），无扩展名的头像文件正好踩中
+_RESERVED = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
 
 __all__ = [
     "DATA_DIR",
@@ -148,29 +160,46 @@ def ensure_dirs() -> None:
 
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    # 临时文件名必须唯一：以前是固定的 `<名字>.tmp`，两个线程同时写
+    # 同一个会话时会互相删/覆盖对方的临时文件，失败方的写入静默丢失。
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        config._replace_with_retry(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------- 通讯录
 
 
 def load_state() -> dict:
-    """通讯录和分类。第一次调用时写入默认值。"""
+    """通讯录和分类。第一次调用时写入默认值。
+
+    字段类型也要校验：`"contacts": "oops"` 这种是「有值但类型错」，
+    只判真值会把它原样返回，后面 `c.get(...)` 直接 AttributeError，
+    整个 /api/info 挂掉。
+    """
     data = config.load()
     changed = False
 
-    if not data.get("contacts"):
-        data["contacts"] = [dict(c) for c in DEFAULT_CONTACTS]
+    contacts = data.get("contacts")
+    if not isinstance(contacts, list) or not all(isinstance(c, dict) for c in contacts):
+        contacts = [dict(c) for c in DEFAULT_CONTACTS]
         changed = True
-    if not data.get("categories"):
-        data["categories"] = list(DEFAULT_CATEGORIES)
+
+    categories = data.get("categories")
+    if not isinstance(categories, list) or not all(isinstance(c, str) for c in categories):
+        categories = list(DEFAULT_CATEGORIES)
         changed = True
 
     if changed:
-        config.update(contacts=data["contacts"], categories=data["categories"])
-    return {"contacts": data["contacts"], "categories": data["categories"]}
+        config.update(contacts=contacts, categories=categories)
+    return {"contacts": contacts, "categories": categories}
 
 
 def save_state(state: dict) -> None:
@@ -203,50 +232,72 @@ def add_contact(
     role: str = "",
     base_url: str = "",
 ) -> dict:
-    state = load_state()
-    cid = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-") or uuid.uuid4().hex[:8]
-    if any(c.get("id") == cid for c in state["contacts"]):
-        cid = f"{cid}-{uuid.uuid4().hex[:4]}"
-    item = {
-        "id": cid,
-        "name": name.strip() or cid,
-        "provider": provider,
-        "model": model,
-        "category": category or "常用",
-        "role": role,
-        "base_url": base_url or "",
-    }
-    state["contacts"].append(item)
-    if item["category"] not in state["categories"]:
-        state["categories"].append(item["category"])
-    save_state(state)
-    return item
+    with _STATE_LOCK:
+        state = load_state()
+        cid = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+        cid = cid or uuid.uuid4().hex[:8]
+        if any(c.get("id") == cid for c in state["contacts"]):
+            cid = f"{cid}-{uuid.uuid4().hex[:4]}"
+        item = {
+            "id": cid,
+            "name": (name or "").strip() or cid,
+            "provider": provider,
+            "model": model,
+            "category": category or "常用",
+            "role": role,
+            "base_url": base_url or "",
+        }
+        state["contacts"].append(item)
+        if item["category"] not in state["categories"]:
+            state["categories"].append(item["category"])
+        save_state(state)
+        return item
 
 
 def update_contact(cid: str, **changes) -> dict | None:
-    state = load_state()
-    for c in state["contacts"]:
-        if c.get("id") == cid:
-            for k in ("name", "provider", "model", "category", "role", "base_url"):
-                if k in changes and changes[k] is not None:
-                    c[k] = changes[k]
-            if c["category"] not in state["categories"]:
-                state["categories"].append(c["category"])
-            save_state(state)
-            return c
-    return None
+    with _STATE_LOCK:
+        state = load_state()
+        for c in state["contacts"]:
+            if c.get("id") == cid:
+                for k in ("name", "provider", "model", "category", "role", "base_url"):
+                    if k in changes and changes[k] is not None:
+                        c[k] = changes[k]
+                if c["category"] not in state["categories"]:
+                    state["categories"].append(c["category"])
+                save_state(state)
+                return c
+        return None
+
+
+def _avatar_file(cid: str) -> Path | None:
+    """头像文件路径。id 不合法就返回 None —— 绝不用原始 id 拼路径。
+
+    以前这里直接 `_avatar_dir() / cid` 然后 unlink()，一个 id 为
+    `../config.json` 的联系人能让「删除联系人」把配置（含 key）删掉。
+    """
+    raw = str(cid or "")
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", raw)
+    if not safe or safe != raw:
+        return None
+    if safe.lower() in _RESERVED:
+        return None
+    return _avatar_dir() / safe
 
 
 def remove_contact(cid: str) -> bool:
-    state = load_state()
-    before = len(state["contacts"])
-    state["contacts"] = [c for c in state["contacts"] if c.get("id") != cid]
-    if len(state["contacts"]) == before:
-        return False
-    save_state(state)
-    path = _avatar_dir() / cid
-    if path.is_file():
-        path.unlink()
+    with _STATE_LOCK:
+        state = load_state()
+        before = len(state["contacts"])
+        state["contacts"] = [c for c in state["contacts"] if c.get("id") != cid]
+        if len(state["contacts"]) == before:
+            return False
+        save_state(state)
+    path = _avatar_file(cid)
+    if path is not None and path.is_file():
+        try:
+            path.unlink()
+        except OSError:
+            pass
     return True
 
 
@@ -264,11 +315,31 @@ def _conv_path(cid: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_-]", "", raw)
     if not safe or safe != raw:
         raise ValueError("非法会话 id")
+    # 长度也要挡：300 个字符会让 open() 抛 OSError(Errno 22)，
+    # 那不是 ValueError，web 层兜不住，直接 500。
+    if len(safe) > 120:
+        raise ValueError("会话 id 太长")
     return _conv_dir() / f"{safe}.json"
 
 
 def _now() -> float:
     return time.time()
+
+
+def _as_float(value) -> float:
+    """排序用的时间戳。字符串/None/字典都当 0，不能让一个坏文件毁掉整个列表。"""
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
+
+
+def _turns_of(data: dict) -> list[dict]:
+    turns = data.get("turns")
+    if not isinstance(turns, list):
+        return []
+    return [t for t in turns if isinstance(t, dict)]
 
 
 def list_conversations() -> list[dict]:
@@ -282,16 +353,22 @@ def list_conversations() -> list[dict]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        if not isinstance(data, dict):
+            continue
+        turns = _turns_of(data)
+        members = data.get("members")
         out.append(
             {
-                "id": data.get("id") or path.stem,
-                "title": data.get("title") or "未命名",
-                "kind": data.get("kind") or "group",
-                "members": data.get("members") or [],
-                "category": data.get("category") or "常用",
-                "turns": len(data.get("turns") or []),
-                "updated": data.get("updated") or 0,
-                "last": _last_snippet(data),
+                # id 以文件名为准：内容里的 id 和文件名不一致时（复制/改名/还原），
+                # 用内容里的 id 会出现「列表里有、点进去 404、删也删不掉」。
+                "id": path.stem,
+                "title": str(data.get("title") or "未命名"),
+                "kind": str(data.get("kind") or "group"),
+                "members": [str(m) for m in members] if isinstance(members, list) else [],
+                "category": str(data.get("category") or "常用"),
+                "turns": len(turns),
+                "updated": _as_float(data.get("updated")),
+                "last": _last_snippet({"turns": turns}),
             }
         )
     # 排序键加 id 做次级比较：连续建两个对话时 updated 可能落在同一 tick，
@@ -301,8 +378,9 @@ def list_conversations() -> list[dict]:
 
 
 def _last_snippet(data: dict, limit: int = 40) -> str:
-    for turn in reversed(data.get("turns") or []):
-        text = (turn.get("content") or "").strip().replace("\n", " ")
+    for turn in reversed(_turns_of(data)):
+        content = turn.get("content")
+        text = str(content).strip().replace("\n", " ") if content else ""
         if text:
             return text[:limit]
     return ""
@@ -317,13 +395,18 @@ def load_conversation(cid: str) -> dict | None:
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    return data if isinstance(data, dict) else None
 
 
 def save_conversation(data: dict) -> dict:
-    cid = data.get("id") or uuid.uuid4().hex[:12]
+    cid = data.get("id")
+    # id 必须是字符串：数字 id 存进去之后，两条 updated 相同、id 一个
+    # int 一个 str 时排序会抛 TypeError，整个列表接口 500。
+    if not isinstance(cid, str) or not cid:
+        cid = uuid.uuid4().hex[:12]
     data["id"] = cid
     data.setdefault("created", _now())
     data["updated"] = _now()
@@ -346,7 +429,8 @@ def rename_conversation(cid: str, title: str, category: str | None = None) -> di
     data = load_conversation(cid)
     if data is None:
         return None
-    data["title"] = title.strip() or data.get("title")
+    clean = (title or "").strip() if isinstance(title, str) else ""
+    data["title"] = clean or data.get("title")
     if category:
         data["category"] = category
     return save_conversation(data)
@@ -360,9 +444,10 @@ def create_conversation(
     category: str = "常用",
     cid: str | None = None,
 ) -> dict:
+    clean = (title or "").strip() if isinstance(title, str) else ""
     data = {
         "id": cid or uuid.uuid4().hex[:12],
-        "title": title.strip() or "未命名",
+        "title": clean or "未命名",
         "kind": kind,
         "members": list(members),
         "category": category or "常用",
@@ -390,19 +475,21 @@ def search(query: str, limit: int = 60) -> list[dict]:
         data = load_conversation(summary["id"])
         if not data:
             continue
-        if q in (data.get("title") or "").lower():
+        title = str(data.get("title") or "")
+        if q in title.lower():
             hits.append(
                 {
                     "conversation": summary["id"],
                     "title": summary["title"],
                     "speaker": "",
-                    "snippet": data.get("title") or "",
+                    "snippet": title,
                     "where": "标题",
                     "updated": summary["updated"],
                 }
             )
-        for turn in data.get("turns") or []:
-            text = turn.get("content") or ""
+        for turn in _turns_of(data):
+            content = turn.get("content")
+            text = str(content) if content else ""
             idx = text.lower().find(q)
             if idx < 0:
                 continue
@@ -413,7 +500,7 @@ def search(query: str, limit: int = 60) -> list[dict]:
                 {
                     "conversation": summary["id"],
                     "title": summary["title"],
-                    "speaker": turn.get("speaker") or "",
+                    "speaker": str(turn.get("speaker") or ""),
                     "snippet": snippet,
                     "where": "发言",
                     "updated": summary["updated"],
@@ -428,19 +515,33 @@ def search(query: str, limit: int = 60) -> list[dict]:
 
 
 def avatar_path(cid: str) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9_-]", "", cid) or "generic"
+    """头像文件路径。只用于读内置兜底图（"generic"）。
+
+    用户上传一律走 `_avatar_file()`，那里会拒绝非法 id ——
+    这里「净化后接着用」会让 "a b" 和 "ab" 撞到同一个文件。
+    """
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(cid or "")) or "generic"
+    if safe.lower() in _RESERVED:
+        safe = "generic"
     return _avatar_dir() / safe
 
 
 def save_avatar(cid: str, data_uri: str) -> bool:
     """存用户上传的头像。只接受 data URI，不接受 URL（避免变成 SSRF 入口）。"""
-    if not data_uri.startswith("data:image/"):
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:image/"):
         return False
     # 1MB 上限，别让 config 目录变成图床
     if len(data_uri) > 1_400_000:
         return False
+    path = _avatar_file(cid)
+    if path is None:
+        # id 非法（穿越、保留名、空）：拒绝，不要悄悄写到别的文件上
+        return False
     ensure_dirs()
-    _atomic_write(avatar_path(cid), data_uri)
+    try:
+        _atomic_write(path, data_uri)
+    except OSError:
+        return False
     return True
 
 

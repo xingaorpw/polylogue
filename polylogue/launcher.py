@@ -11,6 +11,7 @@ Edge/Chrome 内核，零依赖，渲染质量还是最好的那一档。
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import sys
@@ -32,6 +33,26 @@ _CANDIDATES = [
     os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
     r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
 ]
+
+
+def _is_bind_error(exc: OSError) -> bool:
+    """这个 OSError 是不是「端口被占/不能用」。
+
+    Windows: WinError 10048 (已占用) / 10013 (权限不允许)。
+    POSIX:   errno.EADDRINUSE / EACCES。
+
+    注意 EACCES 两边都可能出现：POSIX 上绑 1024 以下端口是 EACCES，
+    写一个没有权限的目录也是 EACCES。区别是文件类错误带 `filename`，
+    socket bind 不带 —— 有 filename 就一定是文件问题，不是端口问题。
+    """
+    if getattr(exc, "filename", None):
+        return False
+    code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+    if code in (10048, 10013):
+        return True
+    if code in (errno.EADDRINUSE, errno.EACCES, errno.EADDRNOTAVAIL):
+        return True
+    return False
 
 
 def find_browser() -> str | None:
@@ -84,15 +105,29 @@ def run_app(
                 on_ready=lambda url: (holder.__setitem__("url", url), ready.set()),
             )
         except OSError as exc:
-            # 端口被占是最常见的启动失败，给一句人话
-            holder["error"] = f"端口 {port} 用不了（{exc}）。换个端口：polylogue --app --port 8800"
+            # 只有 bind 失败才是「端口用不了」。~/.polylogue 不可写、
+            # 磁盘满也会抛 OSError，把它们都说成端口问题会把人引到
+            # 完全错误的方向（换端口没用）。
+            if _is_bind_error(exc):
+                holder["error"] = (
+                    f"端口 {port} 被占用（{exc}）。换个端口：polylogue --app --port 8800"
+                )
+            else:
+                holder["error"] = f"启动失败：{type(exc).__name__}: {exc}"
+            ready.set()
+        except Exception as exc:  # noqa: BLE001
+            # 数据文件坏了（比如某个会话 JSON 字段类型不对）会在
+            # on_ready 之前抛非 OSError。以前只捕 OSError，这个线程
+            # 直接死掉、ready 永不 set，用户干等 30 秒只看到「启动超时」。
+            holder["error"] = f"启动失败：{type(exc).__name__}: {exc}"
             ready.set()
 
     thread = threading.Thread(target=boot, daemon=True)
     thread.start()
 
     if not ready.wait(30):
-        print("启动超时")
+        print("启动超时（30 秒内服务没起来）")
+        print("可能是数据目录异常或端口被占，试试：polylogue --app --port 8800")
         return 1
 
     if "error" in holder:
@@ -108,6 +143,7 @@ def run_app(
             os.startfile(url)  # type: ignore[attr-defined]
         except OSError:
             print(f"请手动打开：{url}")
+        print("关掉这个窗口（或按 Ctrl+C）即退出。")
         try:
             while True:
                 time.sleep(3600)
@@ -127,6 +163,10 @@ def run_app(
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=Translate",
+        # 没有这个参数时，Edge/Chrome 关掉窗口后进程还留着
+        # （「启动加速/后台扩展继续运行」），proc.wait() 永远不返回，
+        # 服务和端口一起挂着，下次启动就报端口被占。
+        "--disable-background-mode",
     ]
 
     print(f"窗口已打开：{url}")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
@@ -51,21 +53,37 @@ class Session:
         self.context_budget = context_budget
         self.rounds = 0
         self.calls = 0
+        # 本次会商里「查不到价格」的调用次数。不能只看累计金额 ——
+        # 全都查不到价格时金额恒为 0，成本上限就完全不起作用了。
+        self.unknown_calls = 0
 
     # ---------------------------------------------------------------- 单次调用
 
-    def _ask(self, name: str) -> Turn:
-        provider = self.providers[name]
-        messages = self.room.context_for(
+    def _messages_for(self, name: str):
+        return self.room.context_for(
             name, keep_recent=self.keep_recent, budget_tokens=self.context_budget
         )
-        system = self.room.system_for(name)
+
+    def _ask_with(self, name: str, messages, system: str) -> Turn:
+        """只负责发请求。上下文由调用方传进来 —— 这样并行时可以先快照。"""
+        provider = self.providers[name]
         try:
             reply = provider.complete(messages, system=system)
         except ProviderError as exc:
             return self.room.add_model(name, "", error=str(exc))
+        except Exception as exc:  # noqa: BLE001 - 一个模型崩了不该拖垮整场
+            # 保留 traceback，否则真实代码 bug 会被伪装成「某家模型挂了」
+            traceback.print_exc(file=sys.stderr)
+            return self.room.add_model(
+                name, "", error=f"内部错误：{type(exc).__name__}: {exc}"
+            )
 
-        cost = cost_of(reply.model, reply.usage.prompt_tokens, reply.usage.completion_tokens)
+        # 本地模型（ollama / lmstudio / 自建回环端点）成本是真的 0，
+        # 不能算「未知」—— 否则成本上限会把它们当成不可估量的风险。
+        if getattr(provider, "free", False):
+            cost = 0.0
+        else:
+            cost = cost_of(reply.model, reply.usage.prompt_tokens, reply.usage.completion_tokens)
         return self.room.add_model(
             name,
             reply.text,
@@ -74,13 +92,24 @@ class Session:
             latency_s=reply.latency_s,
         )
 
+    def _ask(self, name: str) -> Turn:
+        return self._ask_with(name, self._messages_for(name), self.room.system_for(name))
+
     def _ask_many(self, names: list[str]) -> list[Turn]:
         """同一轮的多个模型并行问。
 
         注意：这一轮里它们互相看不见对方 —— 这正是「同时问多个模型」该有的语义。
         要它们互相看见，得等下一轮。
         """
+        # 调用次数是硬上限：本轮有几个人就先扣几次，扣不下的直接不发。
+        # 只在轮次边界检查的话，一次并行就能把上限突破 N 倍。
+        remaining = self.budget.max_calls - self.calls
+        if remaining <= 0:
+            return []
+        if len(names) > remaining:
+            names = names[:remaining]
         self.calls += len(names)
+
         if len(names) == 1 or not self.parallel:
             turns = []
             for name in names:
@@ -88,23 +117,29 @@ class Session:
                 turns.append(turn)
                 if self.on_turn:
                     self.on_turn(turn)
-            return turns
-
-        # 先把上下文快照下来，保证并行时各自看到的是同一份历史
-        with ThreadPoolExecutor(max_workers=min(len(names), 4)) as pool:
-            futures = {pool.submit(self._ask, name): name for name in names}
+        else:
+            # 先在主线程把每个人的上下文快照下来，再并行发请求。
+            # 在工作线程里取上下文的话，先返回的模型已经把自己的发言写进
+            # room.turns 了，后发的模型就会看见同一轮里的其他人 ——
+            # 那等于串行，还会多出接话轮次和额外费用。
+            jobs = [
+                (name, self._messages_for(name), self.room.system_for(name)) for name in names
+            ]
             turns = []
-            for future, name in futures.items():
-                try:
+            with ThreadPoolExecutor(max_workers=len(names)) as pool:
+                futures = [pool.submit(self._ask_with, *job) for job in jobs]
+                for future in futures:
                     turns.append(future.result())
-                except Exception as exc:  # noqa: BLE001 - 单个模型崩了不该拖垮整轮
-                    turns.append(self.room.add_model(name, "", error=f"内部错误：{exc}"))
-        # 按房间成员顺序整理，保证输出稳定
-        order = {name: i for i, name in enumerate(self.room.members)}
-        turns.sort(key=lambda t: order.get(t.speaker, 99))
+            # 按房间成员顺序整理，保证输出稳定
+            order = {name: i for i, name in enumerate(self.room.members)}
+            turns.sort(key=lambda t: order.get(t.speaker, 99))
+            for turn in turns:
+                if self.on_turn:
+                    self.on_turn(turn)
+
         for turn in turns:
-            if self.on_turn:
-                self.on_turn(turn)
+            if turn.ok and turn.cost is None:
+                self.unknown_calls += 1
         return turns
 
     # ---------------------------------------------------------------- 主循环
@@ -113,6 +148,18 @@ class Session:
         """用户说一句，然后跑完它引发的所有模型轮次。"""
         user_turn = self.room.add_user(text)
         speakers = self.room.next_speakers(user_turn)
+        if not speakers:
+            # 点了一个不存在的名字：要说清楚，否则用户以为程序卡住了
+            missed = self.room.unmatched_mentions(text)
+            if missed:
+                return SessionResult(
+                    [],
+                    StopReason(
+                        "unknown_mention",
+                        f"没找到 {'、'.join(missed)}。检查名字拼写，或者不带 @ 让所有人回答",
+                    ),
+                )
+            return SessionResult([], StopReason("awaiting_user", "没有模型被点名，等你发言"))
         return self._run(speakers)
 
     def _run(self, speakers: list[str]) -> SessionResult:
@@ -129,6 +176,12 @@ class Session:
 
             self.rounds += 1
             turns = self._ask_many(speakers)
+            if not turns:
+                # 调用次数已经用满，这一轮一个人都发不出去
+                return SessionResult(
+                    produced,
+                    StopReason("max_calls", f"到达调用次数上限（{self.budget.max_calls} 次）"),
+                )
             produced.extend(turns)
 
             ok_turns = [t for t in turns if t.ok]
@@ -163,6 +216,12 @@ class Session:
                         nxt.append(name)
             speakers = [n for n in nxt if n in self.providers]
 
+        # 一轮就结束（没人继续接话）时，上限还是要在「等你发言」之前报出来。
+        # 否则这一轮已经烧掉的调用/成本被一句「等你发言」盖住，用户根本
+        # 不知道刚才撞了顶。
+        stop = self._stop_reason()
+        if stop:
+            return SessionResult(produced, stop)
         return SessionResult(produced, StopReason("awaiting_user", "没有模型继续接话，等你发言"))
 
     def _stop_reason(self) -> StopReason | None:
@@ -173,4 +232,5 @@ class Session:
             cost=cost,
             cost_unknown=unknown,
             tokens=self.room.total_usage.total,
+            unknown_calls=self.unknown_calls,
         )

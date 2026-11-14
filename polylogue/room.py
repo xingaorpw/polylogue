@@ -19,8 +19,14 @@ from .providers import Message, Usage
 
 __all__ = ["Turn", "Room", "MENTION_RE"]
 
-# @名字。允许字母数字下划线连字符，这样 @gemini / @deepseek-chat 都能抓。
-MENTION_RE = re.compile(r"@([A-Za-z0-9_-]+)")
+# @名字。允许字母数字下划线连字符，也允许中文/日文/韩文 ——
+# 联系人名字可以叫「小助手」，正则切不出来的话交接链会静默断掉。
+# 注意：真正的成员匹配不用这个正则（见 mentions），它只用来找
+# 「写了 @ 但没对上任何人」的情况。
+MENTION_RE = re.compile(
+    r"@([A-Za-z0-9_\-\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+)"
+)
+_AT_ALL = re.compile(r"@all(?![A-Za-z0-9_\-])", re.IGNORECASE)
 
 USER = "user"
 ALL = "all"
@@ -84,22 +90,49 @@ class Room:
     # ---------------------------------------------------------------- 路由
 
     def mentions(self, text: str) -> list[str]:
-        """从一段话里找出被点名的成员，按出现顺序去重。"""
+        """从一段话里找出被点名的成员，按出现顺序去重。
+
+        直接拿成员名字去文本里找，而不是先用正则切出「@单词」再比对。
+        原因：成员名可以是「小助手」「gpt-4o mini」「claude 3.5」这种，
+        正则切不出来（空格、中文、点），那样模型 @ 了人也等于没 @，
+        对话会静默停成 awaiting_user，用户完全看不出发生了什么。
+        """
+        lowered = (text or "").lower()
+        hits: list[tuple[int, str]] = []
+        for name in self.members:
+            needle = "@" + name.lower()
+            start = lowered.find(needle)
+            while start >= 0:
+                end = start + len(needle)
+                # 必须落在词边界：@gpt 不能命中 @gpt4
+                if end >= len(lowered) or not (
+                    lowered[end].isalnum() or lowered[end] in "_-"
+                ):
+                    hits.append((start, name))
+                    break
+                start = lowered.find(needle, start + 1)
+        hits.sort(key=lambda pair: pair[0])
+
         found: list[str] = []
-        for raw in MENTION_RE.findall(text):
-            name = raw.lower()
-            if name == ALL:
-                for m in self.members:
-                    if m not in found:
-                        found.append(m)
-                continue
-            if name == USER:
-                continue
-            # 大小写不敏感匹配成员名
+        for _, name in hits:
+            if name not in found:
+                found.append(name)
+        if _AT_ALL.search(lowered):
             for m in self.members:
-                if m.lower() == name and m not in found:
+                if m not in found:
                     found.append(m)
         return found
+
+    def unmatched_mentions(self, text: str) -> list[str]:
+        """写了 @ 但对不上任何成员的名字。用来给用户一个明确的提示。"""
+        out: list[str] = []
+        for raw in MENTION_RE.findall(text or ""):
+            low = raw.lower()
+            if low in (ALL, USER):
+                continue
+            if not any(m.lower() == low for m in self.members) and f"@{raw}" not in out:
+                out.append(f"@{raw}")
+        return out
 
     def mentions_user(self, text: str) -> bool:
         return USER in [m.lower() for m in MENTION_RE.findall(text)]
@@ -113,7 +146,13 @@ class Room:
         """
         if turn.speaker == USER:
             named = self.mentions(turn.content)
-            return named or list(self.members)
+            if named:
+                return named
+            # 写了 @ 却一个成员都没对上（拼错、模型已下线、只写了 @user）：
+            # 不要退化成全员广播 —— 一次误输入就是 N 次付费调用。
+            if "@" in (turn.content or ""):
+                return []
+            return list(self.members)
 
         named = [m for m in self.mentions(turn.content) if m != turn.speaker]
         return named
@@ -149,6 +188,10 @@ class Room:
             )
         for turn in turns:
             if not turn.ok:
+                continue
+            # 空内容不能进上下文：Anthropic 不接受空 content，
+            # 一条空 assistant 会让那个模型之后每一轮都 400。
+            if not (turn.content or "").strip():
                 continue
             if turn.speaker == name:
                 out.append(Message(role="assistant", content=turn.content, speaker=name))
