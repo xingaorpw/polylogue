@@ -1,7 +1,7 @@
 # polylogue
 
 [![CI](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml/badge.svg)](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml)
-![tests](https://img.shields.io/badge/tests-350%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-409%20passing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![deps](https://img.shields.io/badge/dependencies-0-success)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -322,6 +322,12 @@ polylogue --forget openrouter  # 删掉
 - **Q 版头像是手写的 SVG，不是官方素材**。用配色和标志性元素区分厂商，
   不是各家的官方形象。
 - **搜索是全文顺序扫描**。对话上百个之后会变慢，没有建索引。
+- **`--roles` / `--provider` 的解析错误仍然静默**。写错的角色映射会被丢掉，
+  不报错。成员级配置走 `config.json` 更可靠。
+- **`config.update(api_keys={})` 清不掉 key**（深合并语义）。要用
+  `polylogue --forget <名字>`。
+- **会话 id 在大小写不敏感的文件系统上会撞**（`ABC` 和 `abc` 指向同一个文件）。
+  正常使用（自动生成的 id 全是小写）碰不到。
 - **工作台没有账号鉴权**。靠的是「只监听 127.0.0.1 + 校验 Host/Origin」，
   能挡住网页和 DNS rebinding，但挡不住**本机其他用户**直接连这个端口。
   别改成 `0.0.0.0` 挂公网。
@@ -332,7 +338,13 @@ polylogue --forget openrouter  # 删掉
 python -m unittest discover -s tests -t .
 ```
 
-279 个测试，全部离线（用假上游，不打真实 API）。
+409 个测试，全部离线（用假上游，不打真实 API）。真实输出：
+
+```
+Ran 409 tests in 13.368s
+
+OK (skipped=1)
+```
 
 ## License
 

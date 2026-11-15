@@ -111,6 +111,13 @@ def _explain(name: str, code: int, detail: str) -> str:
     if code == 429 or "rate limit" in low:
         return f"{name} 被限流了（免费模型常见）。等几十秒再发，或换付费档位。"
     if code == 403:
+        # 地区限制：同一个 key、同一套代码，换个模型就好 —— 用户
+        # 看到原始 JSON 只会以为是 key 坏了，然后去反复重配。
+        if "not available in your region" in low or "region" in low:
+            return (
+                f"{name} 这个模型在你的地区不可用（403）。"
+                f"key 没问题，换一个模型或换「省钱」档再试。"
+            )
         return f"{name} 拒绝访问（403）：{detail[:160]}"
     if code >= 500:
         return f"{name} 服务端出错（{code}），过一会儿再试。"
@@ -498,7 +505,7 @@ PRESETS: dict[str, dict[str, str]] = {
         "kind": "openai",
         "base_url": "https://openrouter.ai/api/v1",
         "env": "OPENROUTER_API_KEY",
-        "model": "anthropic/claude-sonnet-4",
+        "model": "anthropic/claude-sonnet-4.5",
     },
     "mistral": {
         "kind": "openai",

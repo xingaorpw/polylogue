@@ -67,6 +67,12 @@ PRICES: dict[str, tuple[float, float]] = {
     "glm-4-plus": (0.70, 0.70),
     # --- 托管
     "llama-3.3-70b": (0.71, 0.71),
+    # 内置 preset 用的就是这两个 id，之前只登记了短名 `llama-3.3-70b`，
+    # `-versatile` / `-Instruct-Turbo` 后缀匹配不上 → 查不到价格 →
+    # 四次调用后成本护栏以「查不到价格」停掉会话，用户用的还是默认模型。
+    # 键用 normalize 之后的形式（去掉 vendor 前缀），否则查不到
+    "llama-3.3-70b-versatile": (0.59, 0.79),  # Groq
+    "llama-3.3-70b-instruct-turbo": (0.88, 0.88),  # Together（meta-llama/…）
     "mistral-large": (2.00, 6.00),
     # --- 免费变体（这些确实 0 元）
     "ernie-5.5-flash-preview": (0.0, 0.0),

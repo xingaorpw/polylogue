@@ -119,12 +119,27 @@ class TestBudget(unittest.TestCase):
         self.assertIsNotNone(stop)
         self.assertEqual(stop.code, "max_cost")
 
-    def test_unknown_cost_near_limit_stops(self):
-        """查不到价格的调用，成本是下界，不能当成安全放行。"""
+    def test_historical_unknown_cost_does_not_disable_the_ceiling(self):
+        """历史里有无价回复，不该让之后每条消息都以「查不到价格」停掉。
+
+        成本上限是按**每次发言**算的（web 和 CLI 现在都是每条消息新建
+        Session）。以前拿整段历史判断，聊天记录里只要有一条无价回复，
+        用户设的 max_cost_usd 就永久失效，而提示还在怪他「换用价格表里的
+        模型」。历史里**已知**的成本仍然计入总额（见上一条测试）。
+        """
         room = Room(["a"])
         session = Session(room, {"a": MockProvider("a")}, budget=Budget(max_cost_usd=1.0))
         room.add_model("a", "x", cost=0.5)  # 已知 0.5
-        room.add_model("a", "y", cost=None)  # 未知
+        room.add_model("a", "y", cost=None)  # 历史里的未知
+        stop = session._stop_reason()
+        self.assertIsNone(stop, "历史里的无价回复把成本上限永久关掉了")
+
+    def test_this_session_unknown_calls_still_stop(self):
+        """本次发言里查不到价格的调用仍然要停 —— 那才是真的不知道花了多少。"""
+        room = Room(["a"])
+        session = Session(room, {"a": MockProvider("a")}, budget=Budget(max_cost_usd=1.0))
+        room.add_model("a", "x", cost=0.5)
+        session.unknown_calls = 1
         stop = session._stop_reason()
         self.assertIsNotNone(stop)
         self.assertEqual(stop.code, "max_cost_uncertain")

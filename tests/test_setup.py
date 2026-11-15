@@ -30,7 +30,6 @@ class Isolated(unittest.TestCase):
         self.patches = [
             mock.patch.object(config, "CONFIG_PATH", self.cfg),
             mock.patch.object(credentials, "DSH_CREDENTIALS", self.dsh),
-            mock.patch.object(credentials, "OWN_CONFIG", self.cfg),
         ]
         for p in self.patches:
             p.start()
@@ -139,7 +138,6 @@ class TestSetupEndpoint(Isolated):
         cls._patches = [
             mock.patch.object(config, "CONFIG_PATH", base / "config.json"),
             mock.patch.object(credentials, "DSH_CREDENTIALS", base / "none.yaml"),
-            mock.patch.object(credentials, "OWN_CONFIG", base / "config.json"),
         ]
         for p in cls._patches:
             p.start()

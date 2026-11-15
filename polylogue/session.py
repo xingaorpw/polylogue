@@ -188,27 +188,10 @@ class Session:
             if not ok_turns:
                 return SessionResult(produced, StopReason("all_failed", "这一轮所有模型都调用失败"))
 
-            # 收敛判断：全部主张可以定，或新信息都很少
-            if all(looks_converged(t.content) for t in ok_turns):
-                return SessionResult(produced, StopReason("converged", "所有发言都表示可以收敛"))
-
-            # 新信息判断要和「同一轮其他模型」比 —— 只跟本轮之前的历史比，
-            # 会漏掉「三个模型说同一件事」这种情况，而那正是最该停的时候。
-            previous = [t.content for t in self.room.turns if t not in turns and t.ok]
-            fresh = [
-                novelty(t.content, previous + [o.content for o in ok_turns if o is not t])
-                for t in ok_turns
-            ]
-            if fresh and max(fresh) < self.min_novelty:
-                return SessionResult(
-                    produced,
-                    StopReason(
-                        "no_new_info",
-                        f"这一轮的新信息都很少（最高 {max(fresh):.0%}），继续下去只会重复",
-                    ),
-                )
-
-            # 下一轮谁说：只认这一轮里点到的名字
+            # 下一轮谁说：只认这一轮里点到的名字。
+            # 先算这个，因为显式 @ 交接要**优先于**收敛判断 —— 模型说
+            # 「我同意这个结论。@b 你再核实一下并发那一段」时，点名是明确的
+            # 下一步指令，以前会被「看起来收敛了」抢在前面静默丢掉，b 一次没被叫。
             nxt: list[str] = []
             for turn in ok_turns:
                 for name in self.room.next_speakers(turn):
@@ -216,21 +199,50 @@ class Session:
                         nxt.append(name)
             speakers = [n for n in nxt if n in self.providers]
 
+            if not speakers:
+                # 收敛判断：全部主张可以定，或新信息都很少
+                if all(looks_converged(t.content) for t in ok_turns):
+                    return SessionResult(produced, StopReason("converged", "所有发言都表示可以收敛"))
+
+                # 新信息判断要和「同一轮其他模型」比 —— 只跟本轮之前的历史比，
+                # 会漏掉「三个模型说同一件事」这种情况，而那正是最该停的时候。
+                previous = [t.content for t in self.room.turns if t not in turns and t.ok]
+                fresh = [
+                    novelty(t.content, previous + [o.content for o in ok_turns if o is not t])
+                    for t in ok_turns
+                ]
+                if fresh and max(fresh) < self.min_novelty:
+                    return SessionResult(
+                        produced,
+                        StopReason(
+                            "no_new_info",
+                            f"这一轮的新信息都很少（最高 {max(fresh):.0%}），继续下去只会重复",
+                        ),
+                    )
+
         # 一轮就结束（没人继续接话）时，上限还是要在「等你发言」之前报出来。
         # 否则这一轮已经烧掉的调用/成本被一句「等你发言」盖住，用户根本
         # 不知道刚才撞了顶。
+        # 手动停止也要在这里再查一次：请求飞行途中按了停止、而模型又没 @ 人，
+        # 以前会报成「等你发言」，前端显示的是待输入状态而不是「已手动停止」。
+        if self.should_stop and self.should_stop():
+            return SessionResult(produced, StopReason("cancelled", "已手动停止"))
         stop = self._stop_reason()
         if stop:
             return SessionResult(produced, stop)
         return SessionResult(produced, StopReason("awaiting_user", "没有模型继续接话，等你发言"))
 
     def _stop_reason(self) -> StopReason | None:
-        cost, unknown = self.room.total_cost()
+        cost, _history_unknown = self.room.total_cost()
         return self.budget.check(
             rounds=self.rounds,
             calls=self.calls,
             cost=cost,
-            cost_unknown=unknown,
+            # 只按**本次发言**里查不到价格的调用来判断不确定性。
+            # 拿整段历史判断的话，聊天记录里只要有一条无价回复，
+            # 之后每条消息都会以「查不到价格」停掉 —— 用户设的成本上限
+            # 变成永久关闭，而且提示还在怪他「换用价格表里的模型」。
+            cost_unknown=self.unknown_calls > 0,
             tokens=self.room.total_usage.total,
             unknown_calls=self.unknown_calls,
         )

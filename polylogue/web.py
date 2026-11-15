@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import sys
 import threading
+import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,7 +27,7 @@ from . import avatars, bootstrap, config, credentials, store
 from .credentials import discover, mask, save_key
 from .guard import Budget
 from .pricing import PRICE_TABLE_DATE
-from .providers import PRESETS, ProviderError, build_provider, resolve_name
+from .providers import PRESETS, ProviderError, Usage, build_provider, resolve_name
 from .room import Room
 from .session import Session
 
@@ -37,6 +39,57 @@ STATIC = Path(__file__).parent / "static"
 # 只认本机回环。DNS rebinding 会把恶意域名解析到 127.0.0.1，
 # 校验 Host 是唯一能识破的办法。
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def _str_field(data: dict, key: str, default: str = "") -> str:
+    """从 JSON 体里取字符串字段。
+
+    客户端传 `{"title": 123}` / `{"provider": ["x"]}` 时直接 `.strip()`
+    会 AttributeError —— 那是 400 的活，不是 500。数字按字符串收下，
+    其余类型退回默认值。
+    """
+    value = data.get(key)
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return default
+
+
+def _str_list(data: dict, key: str) -> list[str]:
+    """取字符串列表。非列表、或元素不是字符串的，一律丢掉。"""
+    value = data.get(key)
+    if not isinstance(value, list):
+        return []
+    return [v.strip() for v in value if isinstance(v, str) and v.strip()]
+
+
+def _guarded(fn):
+    """兜住所有没预料到的异常，变成 500 + 栈，而不是把连接直接断掉。
+
+    不兜的话（实测）：请求体是 `[]` 时 `data.get(...)` 抛 AttributeError，
+    异常逃出 `do_POST`，`BaseHTTPRequestHandler` 只把连接关掉 —— 客户端
+    收到 `RemoteDisconnected`，前端只能显示「网络错误」，终端里也没有
+    任何指向具体接口的线索。502/500 至少能让人知道是服务端崩了。
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except ConnectionError:
+            # 客户端自己走了（关标签页 / 取消请求）。这是正常操作，不是服务端
+            # 错误 —— 打成 traceback 只会让终端里全是假警报，把真问题埋掉。
+            return None
+        except Exception as exc:  # noqa: BLE001 - 兜底就是它的职责
+            traceback.print_exc(file=sys.stderr)
+            try:
+                self._json(500, {"error": f"服务端内部错误：{type(exc).__name__}"})
+            except Exception:  # noqa: BLE001 - 连响应都发不出去就没办法了
+                pass
+            return None
+
+    return wrapper
 
 # 请求体上限。头像 data URI 最大 1.4MB，2MB 留足余量；
 # 再大就是有人在拿我们当内存垃圾桶。
@@ -177,12 +230,25 @@ def _room_from(conv: dict) -> tuple[Room, dict, list[str]]:
             roles[contact.get("name") or cid] = contact["role"]
 
     room = Room(names, roles=roles)
-    # 回填历史：这样多轮对话接得上，压缩也基于完整历史
+    # 回填历史：这样多轮对话接得上，压缩也基于完整历史。
+    #
+    # 必须把 usage 和 cost 一起带回来。以前只回填文字，`room.total_cost()`
+    # 永远是 (0.0, True) —— 每条消息的成本都从 0 重新算，`max_cost_usd`
+    # 完全拦不住（实测 8 条消息真实花了 $1.60、上限 $0.50，一次都没停）。
     for turn in conv.get("turns") or []:
         if turn.get("role") == "user":
             room.add_user(turn.get("content") or "")
         elif turn.get("speaker") in names:
-            room.add_model(turn["speaker"], turn.get("content") or "")
+            tokens = turn.get("tokens")
+            cost = turn.get("cost")
+            room.add_model(
+                turn["speaker"],
+                turn.get("content") or "",
+                # 存的只有总数，拆不出 prompt/completion —— 但上限判断只看总数
+                usage=Usage(prompt_tokens=int(tokens or 0), completion_tokens=0),
+                cost=cost if isinstance(cost, (int, float)) else None,
+                error=turn.get("error"),
+            )
     return room, providers, skipped
 
 
@@ -235,9 +301,29 @@ def serve(
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # 空闲连接不能无限占着一个线程：浏览器开着标签页不关、
+        # 或者有人只连不发，默认实现会为每条连接永久留一个线程。
+        timeout = 60
 
         def log_message(self, fmt, *args):
             pass
+
+        def version_string(self) -> str:
+            # 默认是 "BaseHTTP/0.6 Python/3.13.17"，把解释器版本白送给
+            # 任何能连上来的人，没有任何好处。
+            return "polylogue"
+
+        def handle_one_request(self) -> None:
+            # `_sent` 必须**每个请求**重置。BaseHTTPRequestHandler 一个连接
+            # 只创建一个实例、在 handle() 里循环处理请求；不重置的话第一个
+            # 响应把 `_sent` 置 True，同一连接上的第二个请求会走进 `_json`
+            # 的早退分支，一个字节都不写 —— 客户端只能超时。
+            # 浏览器必然复用连接（GET / 之后紧接着 GET /api/info），
+            # 所以这是「首屏永远转圈」级别的 bug。测试全绿是因为
+            # 测试每次都新建 HTTPConnection。
+            self._sent = False
+            self._body_cache = None
+            super().handle_one_request()
 
         # ------------------------------------------------------ 工具
 
@@ -270,13 +356,47 @@ def serve(
         def _text(self, code: int, body: str, ctype: str) -> None:
             self._bytes(code, body.encode("utf-8"), ctype)
 
-        def _body(self) -> dict:
-            length = int(self.headers.get("Content-Length") or 0)
-            if not length:
-                return {}
+        def _read_raw(self) -> bytes:
+            """把请求体读进缓存，**只读一次**。
+
+            为什么必须保证「每个请求的 body 都被读干净」：没读走的字节会留在
+            缓冲区里，被 `BaseHTTPRequestHandler` 当成下一个请求的请求行。
+            实测同一连接上 `POST /api/conversations/x/stop`（这个分支不用 body）
+            之后发 `PUT`，服务端把残留的 `{}` 当请求行解析，回了
+            `501 Unsupported method`。浏览器会复用连接，所以这不是理论问题。
+            """
+            cached = getattr(self, "_body_cache", None)
+            if cached is not None:
+                return cached
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                self._body_cache = b""
+                raise ValueError("Content-Length 不合法")
+            if length < 0:
+                # `read(-1)` 会一路读到 EOF，线程永久挂住
+                self._body_cache = b""
+                raise ValueError("Content-Length 不合法")
             if length > MAX_BODY:
+                self._body_cache = b""
                 raise ValueError("请求体太大")
-            return json.loads(self.rfile.read(length) or b"{}")
+            try:
+                self._body_cache = self.rfile.read(length) if length else b""
+            except OSError:
+                self._body_cache = b""
+            return self._body_cache
+
+        def _body(self) -> dict:
+            raw = self._read_raw() or b"{}"
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                raise ValueError("请求体不是合法 JSON")
+            # 必须是对象：`[]`、`123`、`"x"` 都是合法 JSON，但后面每个
+            # 接口都会 `data.get(...)`，类型不对就 AttributeError。
+            if not isinstance(data, dict):
+                raise ValueError("请求体必须是 JSON 对象")
+            return data
 
         # -------------------------------------------------- 来源校验
 
@@ -309,6 +429,26 @@ def serve(
             host = (parsed.hostname or "").lower()
             return host in _LOOPBACK_HOSTS
 
+        def _reject(self, code: int, message: str) -> None:
+            """拒绝一个写请求，并**把 body 读掉**。
+
+            不读的话，残留的 body 字节会被当成下一个请求的请求行 ——
+            实测 415 之后同一连接发 `GET /api/info` 会收到
+            `501 Unsupported method`。太大或声明不合法时读不完，就直接断开。
+            """
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = -1
+            if 0 < length <= MAX_BODY:
+                try:
+                    self._read_raw()
+                except ValueError:
+                    self.close_connection = True
+            elif length != 0:
+                self.close_connection = True
+            self._json(code, {"error": message})
+
         def _guard_write(self) -> bool:
             """写操作的三道闸。过了返回 True；没过已经回过响应，返回 False。
 
@@ -321,26 +461,39 @@ def serve(
             DELETE，这条路上没有 CSRF 面。
             """
             if not self._host_ok():
-                self._json(403, {"error": "只接受本机访问"})
+                self._reject(403, "只接受本机访问")
                 return False
             if not self._origin_ok():
-                self._json(403, {"error": "拒绝跨站请求"})
+                self._reject(403, "拒绝跨站请求")
                 return False
 
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except (TypeError, ValueError):
-                self._json(400, {"error": "Content-Length 不合法"})
+                self._reject(400, "Content-Length 不合法")
+                return False
+
+            if length < 0:
+                self._reject(400, "Content-Length 不合法")
                 return False
 
             if ctype not in ("", "application/json") or (length > 0 and ctype != "application/json"):
-                self._json(415, {"error": "写操作必须用 Content-Type: application/json"})
+                self._reject(415, "写操作必须用 Content-Type: application/json")
                 return False
 
             # 在闸门里就拒绝，不读 body —— 否则要先把几 MB 收进内存再说不行
             if length > MAX_BODY:
-                self._json(413, {"error": "请求体太大"})
+                self._reject(413, "请求体太大")
+                return False
+
+            # 过了闸门就把 body 一次读干净：不是每个分支都会用到它
+            # （`/stop`、`DELETE` 就不看 body），但**谁都不能把字节留在
+            # 缓冲区里** —— 残留会被当成下一个请求的请求行。
+            try:
+                self._read_raw()
+            except ValueError as exc:
+                self._reject(400, str(exc))
                 return False
             return True
 
@@ -424,6 +577,7 @@ def serve(
 
         # ------------------------------------------------------ GET
 
+        @_guarded
         def do_GET(self) -> None:
             if not self._guard_read():
                 return
@@ -506,6 +660,7 @@ def serve(
 
         # ------------------------------------------------------ POST / PATCH / DELETE
 
+        @_guarded
         def do_POST(self) -> None:
             if not self._guard_write():
                 return
@@ -531,6 +686,12 @@ def serve(
                     self._say(parts[2])
                     return
                 if len(parts) == 4 and parts[:2] == ["api", "conversations"] and parts[3] == "stop":
+                    # 会话不存在就别建 Event：`cancels` 只在删除会话时回收，
+                    # 对着随机 id 反复按停止会让它无界增长（实测 200 次 → 200 条），
+                    # 而且返回 200 {"ok":true} 会让前端以为真的停掉了什么。
+                    if not store.load_conversation(parts[2]):
+                        self._json(404, {"error": "会话不存在"})
+                        return
                     app.cancel_for(parts[2]).set()
                     self._json(200, {"ok": True})
                     return
@@ -540,6 +701,7 @@ def serve(
 
             self._json(404, {"error": "not found"})
 
+        @_guarded
         def do_PATCH(self) -> None:
             if not self._guard_write():
                 return
@@ -552,7 +714,9 @@ def serve(
 
             if len(parts) == 3 and parts[:2] == ["api", "conversations"]:
                 conv = store.rename_conversation(
-                    parts[2], data.get("title") or "", data.get("category")
+                    parts[2],
+                    _str_field(data, "title"),
+                    _str_field(data, "category") or None,
                 )
                 if not conv:
                     self._json(404, {"error": "会话不存在"})
@@ -561,7 +725,12 @@ def serve(
                 return
 
             if len(parts) == 3 and parts[:2] == ["api", "contacts"]:
-                contact = store.update_contact(parts[2], **data)
+                # 只放行白名单字段：`**data` 直接把客户端键塞进参数表，
+                # 传 {"cid": ...} 会 TypeError（跟位置参数撞名），
+                # 传 {"id": ...} 则能改掉联系人 id，把文件名和内容改散。
+                allowed = ("name", "provider", "model", "category", "role", "base_url")
+                changes = {k: data[k] for k in allowed if k in data}
+                contact = store.update_contact(parts[2], **changes)
                 if not contact:
                     self._json(404, {"error": "联系人不存在"})
                     return
@@ -570,6 +739,7 @@ def serve(
 
             self._json(404, {"error": "not found"})
 
+        @_guarded
         def do_DELETE(self) -> None:
             if not self._guard_write():
                 return
@@ -589,12 +759,39 @@ def serve(
                 return
             self._json(404, {"error": "not found"})
 
+        # 没实现的方法以前落到 BaseHTTPRequestHandler 的默认 501 页面：
+        # 回一个 HTML 错误页，还带 `Server: BaseHTTP/0.6 Python/3.13.17`，
+        # 把解释器版本白送出去。这里统一回 405 + Allow，跟别的接口一致。
+        _ALLOW = "GET, POST, PATCH, DELETE"
+
+        def _not_allowed(self) -> None:
+            body = json.dumps({"error": "不支持这个方法"}, ensure_ascii=False).encode("utf-8")
+            self.send_response(405)
+            self.send_header("Allow", self._ALLOW)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_PUT(self) -> None:
+            self._not_allowed()
+
+        def do_HEAD(self) -> None:
+            self._not_allowed()
+
+        def do_OPTIONS(self) -> None:
+            self._not_allowed()
+
+        def do_TRACE(self) -> None:
+            self._not_allowed()
+
         # ------------------------------------------------------ 具体处理
 
         def _setup(self) -> None:
             data = self._body()
-            provider = (data.get("provider") or "openrouter").strip()
-            api_key = (data.get("api_key") or "").strip()
+            provider = _str_field(data, "provider", "openrouter") or "openrouter"
+            api_key = _str_field(data, "api_key")
             if api_key:
                 save_key(provider, api_key)
             config.update(onboarded=True)
@@ -623,31 +820,34 @@ def serve(
 
         def _create_conv(self) -> None:
             data = self._body()
-            member_ids = [m for m in (data.get("members") or []) if store.contact_by_id(m)]
+            member_ids = [m for m in _str_list(data, "members") if store.contact_by_id(m)]
             if not member_ids:
                 raise ValueError("至少选一个模型")
             kind = "dm" if len(member_ids) == 1 else "group"
-            title = (data.get("title") or "").strip()
+            title = _str_field(data, "title")
             if not title:
                 names = [store.contact_by_id(m)["name"] for m in member_ids]
                 title = names[0] if kind == "dm" else "、".join(names[:3])
             conv = store.create_conversation(
-                title, member_ids, kind=kind, category=data.get("category") or "常用"
+                title,
+                member_ids,
+                kind=kind,
+                category=_str_field(data, "category", "常用") or "常用",
             )
             self._json(201, _summarize(conv))
 
         def _create_contact(self) -> None:
             data = self._body()
-            name = (data.get("name") or "").strip()
+            name = _str_field(data, "name")
             if not name:
                 raise ValueError("名字不能为空")
             contact = store.add_contact(
                 name,
-                data.get("provider") or "openrouter",
-                model=data.get("model") or "",
-                category=data.get("category") or "常用",
-                role=data.get("role") or "",
-                base_url=data.get("base_url") or "",
+                _str_field(data, "provider", "openrouter") or "openrouter",
+                model=_str_field(data, "model"),
+                category=_str_field(data, "category", "常用") or "常用",
+                role=_str_field(data, "role"),
+                base_url=_str_field(data, "base_url"),
             )
             self._json(201, contact)
 
@@ -667,7 +867,7 @@ def serve(
                 self._json(404, {"error": "会话不存在"})
                 return
             data = self._body()
-            text = (data.get("text") or "").strip()
+            text = _str_field(data, "text")
             if not text:
                 self._json(400, {"error": "空消息"})
                 return
@@ -713,8 +913,10 @@ def serve(
                     }
                 )
 
+            # 停止信号属于「正在跑的那次请求」。必须在**拿到锁之后**才 clear：
+            # 在等锁之前 clear 的话，用户刚点的停止会被排队中的请求抹掉，
+            # 正在跑的那次照样跑满轮次（实测上游调用从 2 次涨到 12 次）。
             cancel = app.cancel_for(cid)
-            cancel.clear()
 
             acquired = app.run_lock.acquire(timeout=180)
             if not acquired:
@@ -722,6 +924,7 @@ def serve(
                 finish(None, None)
                 return
 
+            cancel.clear()  # 现在才轮到这次请求接管这个信号
             try:
                 # 拿到锁之后**重新读一遍**。两个请求同时说话时，先到的那个已经
                 # 写过盘了；还拿着开头读到的旧副本去保存，会把对方的发言整段覆盖掉。
@@ -733,6 +936,14 @@ def serve(
 
                 # 用户说的话先落盘再跑模型。模型挂了、内部异常、进程被杀，
                 # 都不该让用户发现自己刚打的字没了。
+                #
+                # 但 Room 必须用**落盘之前**的历史来建：`session.say(text)`
+                # 自己会把这句话加进 Room，重放一次就变成两条一样的 user
+                # 消息 —— 每轮多付一份 prompt token，收敛判断也被污染。
+                before = {
+                    "members": conv.get("members") or [],
+                    "turns": list(conv.get("turns") or []),
+                }
                 conv.setdefault("turns", []).append(
                     {"speaker": "你", "role": "user", "content": text, "ts": store._now()}
                 )
@@ -742,11 +953,15 @@ def serve(
                 # 但这里必须转成 SSE 事件 —— 头已经发了，抛出去会变成
                 # 第二个 HTTP 响应塞进流里。
                 try:
-                    room, providers, skipped = _room_from(conv)
+                    room, providers, skipped = _room_from(before)
                 except ValueError as exc:
                     emit({"type": "error", "speaker": "system", "message": str(exc)})
                     finish(None, store.load_conversation(cid))
                     return
+                # 前端靠 /api/info 的 skipped 显示「跳过：…」，这个字段以前
+                # 从来没被赋值，那行提示永远不会出现。
+                with app.lock:
+                    app.skipped = list(skipped)
 
                 name_to_id = _name_map(conv.get("members") or [])
 
@@ -821,6 +1036,26 @@ def serve(
                     result.stop.message if result.stop else None,
                     store.load_conversation(cid),
                 )
+            except ConnectionError:
+                # 客户端自己走了（关标签页 / 取消）。不是服务端问题，
+                # 别在 stderr 里刷一段栈，前端也不需要收到什么。
+                pass
+            except Exception as exc:  # noqa: BLE001 - 头已经发了，只能走流里报
+                # 走到这里说明是**开流之后**出的错（磁盘满、只读、内部 bug）。
+                # 不兜的话异常会穿出 do_POST，客户端拿到一个 200 + 空流：
+                # 没有 done、没有错误、屏幕上什么都没有，原因只在 stderr。
+                traceback.print_exc(file=sys.stderr)
+                emit(
+                    {
+                        "type": "error",
+                        "speaker": "system",
+                        "message": f"内部错误：{type(exc).__name__}: {exc}",
+                    }
+                )
+                try:
+                    finish(None, store.load_conversation(cid))
+                except Exception:  # noqa: BLE001 - 连收尾都失败就只能这样了
+                    pass
             finally:
                 app.run_lock.release()
 

@@ -102,10 +102,15 @@ def resolve_members(explicit: list[str] | None = None) -> tuple[list[dict], str]
     `provider` 决定用哪个适配器，`model` 是具体模型 id。
     """
     if explicit:
-        return (
-            [{"name": n, "provider": resolve_name(n), "model": None} for n in explicit],
-            "命令行指定",
-        )
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for n in explicit:
+            if n in seen:
+                # `--models a,a` 不该变成两个同名成员
+                continue
+            seen.add(n)
+            rows.append({"name": n, "provider": resolve_name(n), "model": None})
+        return rows, "命令行指定"
 
     cfg = config.load()
     saved = cfg.get("members") or []
@@ -181,6 +186,7 @@ def build_all(
     providers: dict = {}
     active: list[str] = []
     skipped: list[str] = []
+    seen: set[str] = set()
 
     for raw in members:
         item = _as_member(raw)
@@ -188,6 +194,12 @@ def build_all(
             skipped.append(f"{raw!r}：成员格式不对，已忽略")
             continue
         name = item["name"]
+        if name in seen:
+            # 同名成员会让上游被调用两次、收两段一样的回答，token 翻倍，
+            # 而且 providers 字典里第二个会覆盖第一个 —— 用户以为是两个人。
+            skipped.append(f"{name}：重名成员，已忽略")
+            continue
+        seen.add(name)
         # 别名（anthropic/xai/google/gpt）要归一到规范名再查 key ——
         # 否则 keys.get("anthropic") 永远是 None，成员会被静默跳过
         provider = item["provider"] or name

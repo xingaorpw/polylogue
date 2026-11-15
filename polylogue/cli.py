@@ -23,8 +23,45 @@ ROLE_PRESETS = {
 
 
 def _parse_models(spec: str) -> list[str]:
-    """空字符串 = 没指定，交给自动检测决定成员（不是错误）。"""
-    return [p.strip() for p in (spec or "").split(",") if p.strip()]
+    """空字符串 = 没指定，交给自动检测决定成员（不是错误）。
+
+    去重：`--models a,a` 会真的建两个同名成员、向上游发**两次**请求、
+    收两段一样的回答 —— token 翻倍，system prompt 里还会写
+    「房间里还有：a」，模型自己跟自己对话。
+    """
+    out: list[str] = []
+    for part in (spec or "").split(","):
+        name = part.strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _budget_from(args) -> "Budget":
+    """把命令行参数收成 Budget，先校验。
+
+    `--max-rounds 0` / `--max-calls -3` / `--max-cost -1` 以前都能一路走到
+    会话里，变成「到达轮次上限（0 轮）」这种看起来像 bug 的输出；
+    `--max-cost nan` 更糟：`nan` 的比较恒为 False，上限**彻底失效**，
+    用户以为自己设了护栏，实际上一点都没有。
+    """
+    problems = []
+    if args.max_rounds < 1:
+        problems.append(f"--max-rounds 至少 1（收到 {args.max_rounds}）")
+    if args.max_calls < 1:
+        problems.append(f"--max-calls 至少 1（收到 {args.max_calls}）")
+    cost = args.max_cost
+    if cost is not None and not (cost > 0):  # nan 也走这里
+        problems.append(f"--max-cost 必须大于 0（收到 {cost}）")
+    if problems:
+        raise SystemExit("参数不合法：" + "；".join(problems))
+    return Budget(max_rounds=args.max_rounds, max_calls=args.max_calls, max_cost_usd=cost)
+
+
+def _validate_port(port: int) -> int:
+    if not (0 <= port <= 65535):
+        raise SystemExit(f"--port 必须在 0–65535 之间（收到 {port}）")
+    return port
 
 
 def _parse_roles(spec: str | None, members: list[str]) -> dict[str, str]:
@@ -97,6 +134,45 @@ def _whoami() -> int:
     for name in sorted(keys):
         print(f"{name:<14} {mask(keys[name]):<16} {sources.get(name, '未知')}")
     print("\n以上都是掩码，完整 key 不会显示。")
+    return 0
+
+
+def _forget(provider: str) -> int:
+    """删掉本机存的某个 key。
+
+    以前的版本不管三七二十一都打印「已删除 X 的 key」并返回 0：
+    `--forget anthropic`（真名是 claude）报成功但 key 还在；`--forget nosuch`
+    也报成功，还顺手创建一个空的 config.json。用户以为删干净了。
+    """
+    from .credentials import credential_sources, discover, save_key
+    from .providers import resolve_name
+
+    name = (provider or "").strip()
+    if not name:
+        print("--forget 需要一个 provider 名字，例如 --forget openrouter")
+        return 2
+
+    canonical = resolve_name(name)
+    keys = discover()
+    present = [n for n in (canonical, name) if n in keys]
+    if not present:
+        print(f"本机没有 {name} 的 key，无需删除。用 --whoami 看有哪些。")
+        return 2
+
+    if canonical != name:
+        print(f"（{name} 是 {canonical} 的别名）")
+
+    source = credential_sources().get(canonical, "")
+    for key_name in present:
+        save_key(key_name, "")
+    print(f"已从 polylogue 配置里删除 {canonical} 的 key")
+    if source == "环境变量":
+        # 删配置文件对环境变量毫无影响，不说清楚用户会一直以为没删掉
+        print(f"注意：{canonical} 的 key 来自**环境变量**，删配置文件不起作用。")
+        print(f"      要真正移除，请清掉对应的环境变量再开新终端。")
+    elif source == "复用 DSH 凭据":
+        print(f"注意：{canonical} 的 key 是从 DSH 凭据里复用的，删这里不影响它。")
+        print("      要真正移除，请改 ~/.dsh/.credentials.yaml，或设 POLYLOGUE_NO_REUSE=1。")
     return 0
 
 
@@ -178,12 +254,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.whoami:
         return _whoami()
 
-    if args.forget:
-        from .credentials import save_key
-
-        save_key(args.forget, "")
-        print(f"已删除 {args.forget} 的 key")
-        return 0
+    if args.forget is not None:
+        return _forget(args.forget)
 
     if args.login is not None:
         return _login(args.login)
@@ -207,14 +279,36 @@ def main(argv: list[str] | None = None) -> int:
         if model:
             models[name.strip()] = model.strip()
 
-    roles = _parse_roles(args.roles, members)
+    budget = _budget_from(args)
+    port = _validate_port(args.port)
+
+    # 界面模式下成员是在网页的通讯录里管的，命令行这几个参数没有意义。
+    # 以前是静默丢掉 —— 用户写 `--models nosuch` 启动，以为它生效了。
+    if args.app or args.web:
+        ignored = []
+        if members:
+            ignored.append("--models")
+        if args.roles:
+            ignored.append("--roles")
+        if args.provider:
+            ignored.append("--provider")
+        if args.model:
+            ignored.append("--model")
+        if ignored:
+            print(
+                f"提示：界面模式下成员在网页的通讯录里管理，"
+                f"{'、'.join(ignored)} 不会生效。",
+                file=sys.stderr,
+            )
+        if args.prompt:
+            print("提示：界面模式忽略命令行里要问的话，请在网页里输入。", file=sys.stderr)
 
     if args.app:
         from .launcher import run_app
 
         return run_app(
             members or None,
-            port=args.port,
+            port=port,
             custom=_parse_custom(args.provider),
             models=models,
         )
@@ -224,50 +318,65 @@ def main(argv: list[str] | None = None) -> int:
 
         return serve(
             members or None,
-            port=args.port,
-            budget=Budget(
-                max_rounds=args.max_rounds,
-                max_calls=args.max_calls,
-                max_cost_usd=args.max_cost,
-            ),
-            roles=roles,
-            # 这两个之前漏传了：Web 模式下 --provider 和 --model 会被静默忽略，
-            # 而报错信息还在提示用户用 --provider 自定义，等于自己打自己脸。
+            port=port,
+            budget=budget,
+            roles=_parse_roles(args.roles, members),
             custom=_parse_custom(args.provider),
             models=models,
         )
 
-    # 命令行的单次/交互模式必须有明确成员，否则不知道该找谁说话
-    if not members:
-        from .bootstrap import resolve_members
+    # 命令行模式：成员从哪来、key 从哪读、坏成员怎么办，全交给 bootstrap。
+    # 以前这里自己手搓了一套 —— 把 `resolve_members` 返回的 name 当 provider
+    # 名（零配置直接报「不认识的 provider：critic」）、完全不用 discover()
+    # 读到的 key（`--login` 存了也没用）、一个坏成员就 SystemExit 拖垮整间房。
+    from .bootstrap import build_all, resolve_members
 
-        rows, _origin = resolve_members(None)
-        members = [r["name"] for r in rows]
-        if not members:
-            raise SystemExit(
-                "没有可用模型。先跑一次 `polylogue --app` 在界面里填 key，"
-                "或用 --models 指定成员。"
-            )
-
-    providers = _build_providers(members, models, args.provider)
-    room = Room(members, roles=roles)
-    session = Session(
-        room,
-        providers,
-        budget=Budget(max_rounds=args.max_rounds, max_calls=args.max_calls, max_cost_usd=args.max_cost),
-        parallel=not args.sequential,
-        on_turn=None if args.quiet else _print_turn,
+    rows, origin = resolve_members(members or None)
+    providers, active, skipped = build_all(
+        rows, custom=_parse_custom(args.provider), models=models
     )
+    for reason in skipped:
+        print(f"跳过：{reason}", file=sys.stderr)
+    if not active:
+        raise SystemExit(
+            "没有可用模型。先跑一次 `polylogue --app` 在界面里填 key，"
+            "或用 --models 指定成员。"
+        )
+    if origin:
+        print(f"成员来源：{origin}")
+
+    members = active
+    room = Room(members, roles=_parse_roles(args.roles, members))
+
+    def make_session() -> Session:
+        return Session(
+            room,
+            providers,
+            budget=budget,
+            parallel=not args.sequential,
+            on_turn=None if args.quiet else _print_turn,
+        )
+
+    session = make_session()
+
+    def failed() -> bool:
+        """这一轮是不是所有模型都失败了 —— 全失败不能返回 0。"""
+        replies = [t for t in room.turns if t.role == "assistant"]
+        return bool(replies) and all(t.error for t in replies)
 
     print(f"房间成员：{', '.join(members)}")
     print(f"价格表版本：{PRICE_TABLE_DATE}（估算，以各家官网为准）")
 
     if args.prompt:
-        result = session.say(args.prompt)
+        try:
+            result = session.say(args.prompt)
+        except KeyboardInterrupt:
+            print("\n已中断", file=sys.stderr)
+            return 130
         if args.quiet:
             print(room.render())
         _footer(room, result.stop)
-        return 0
+        return 1 if failed() else 0
 
     # ---- 交互模式
     print("输入内容回车发言；@名字 点名；/cost 看花费；/export 导出；/quit 退出")
@@ -294,7 +403,14 @@ def main(argv: list[str] | None = None) -> int:
         if line == "/export":
             print(room.render())
             continue
-        result = session.say(line)
+        # 每次发言新建 Session。轮次/调用次数是**单次发言**的预算，
+        # 建在 while 外面会跨句累积 —— 连说 8 句时第 7 句直接报
+        # 「到达轮次上限（6 轮）」，用户以为程序坏了。web 端就是每次新建。
+        try:
+            result = make_session().say(line)
+        except KeyboardInterrupt:
+            print("\n已中断（正在发出的请求可能还会返回，按两次 Ctrl-C 强制退出）", file=sys.stderr)
+            break
         _footer(room, result.stop)
 
     print("\n" + room.render())

@@ -91,7 +91,6 @@ class Live:
         self.patches = [
             mock.patch.object(config, "CONFIG_PATH", self.cfg),
             mock.patch.object(credentials, "DSH_CREDENTIALS", base / "none.yaml"),
-            mock.patch.object(credentials, "OWN_CONFIG", self.cfg),
         ]
         for p in self.patches:
             p.start()
@@ -610,6 +609,156 @@ class TestCliWiring(unittest.TestCase):
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+
+
+class TestKeepAlive(unittest.TestCase):
+    """同一个 TCP 连接上的多个请求必须各自得到响应。
+
+    这一条曾经让 0.3.4 在真实浏览器里**首屏永久卡死**：`_sent` 是实例属性，
+    一个连接只有一个 Handler 实例，第一个响应把它置 True 之后，同一连接上
+    的第二个请求会走进 `_json` 的早退分支，一个字节都不写 —— 客户端只能超时。
+    浏览器必然复用连接（`GET /` 之后紧接着 `GET /api/info`）。
+
+    测试套件当时全绿，因为所有用例都每次新建 `HTTPConnection`。所以这里
+    必须**显式复用**连接，否则这个 bug 永远不会被发现。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.live = Live(with_key=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.live.stop()
+
+    def _one_connection(self, requests):
+        conn = http.client.HTTPConnection(self.live.host, timeout=10)
+        try:
+            out = []
+            for method, path, body in requests:
+                payload = json.dumps(body).encode() if body is not None else None
+                headers = {"Content-Type": "application/json"} if body is not None else {}
+                conn.request(method, path, body=payload, headers=headers)
+                resp = conn.getresponse()
+                out.append((resp.status, resp.read()))
+            return out
+        finally:
+            conn.close()
+
+    def test_two_gets_on_one_connection(self):
+        results = self._one_connection(
+            [("GET", "/", None), ("GET", "/api/info", None), ("GET", "/api/info", None)]
+        )
+        self.assertEqual([r[0] for r in results], [200, 200, 200], "同一连接上的第 2、3 个请求没响应")
+        self.assertIn(b'"contacts"', results[1][1])
+
+    def test_read_write_read_on_one_connection(self):
+        results = self._one_connection(
+            [
+                ("GET", "/api/info", None),
+                ("POST", "/api/settings", {"theme": "light"}),
+                ("GET", "/api/info", None),
+            ]
+        )
+        self.assertEqual([r[0] for r in results], [200, 200, 200])
+        self.assertEqual(json.loads(results[2][1])["theme"], "light")
+
+    def test_rejected_write_does_not_poison_the_connection(self):
+        """闸门拒绝时要读掉 body，否则残留字节会被当成下一个请求行。"""
+        conn = http.client.HTTPConnection(self.live.host, timeout=10)
+        try:
+            # text/plain 会被 CSRF 闸门拒（415），body 必须被读走
+            conn.request(
+                "POST",
+                "/api/settings",
+                body=json.dumps({"theme": "light"}).encode(),
+                headers={"Content-Type": "text/plain"},
+            )
+            r = conn.getresponse()
+            self.assertEqual(r.status, 415)
+            r.read()
+            # 同一连接继续发请求：以前会收到 501 Unsupported method
+            conn.request("GET", "/api/info")
+            r2 = conn.getresponse()
+            self.assertEqual(r2.status, 200, "被拒请求的 body 残留污染了连接")
+            self.assertIn(b'"contacts"', r2.read())
+        finally:
+            conn.close()
+
+    def test_unread_body_route_does_not_poison_the_connection(self):
+        """正常分支也不能留 body：`/stop` 不读 body，但字节不能留在缓冲区。"""
+        conn = http.client.HTTPConnection(self.live.host, timeout=10)
+        try:
+            conn.request(
+                "POST",
+                "/api/conversations/ghost-id/stop",
+                body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            r = conn.getresponse()
+            self.assertEqual(r.status, 404)
+            r.read()
+            conn.request("PUT", "/api/info")
+            r2 = conn.getresponse()
+            self.assertEqual(r2.status, 405, "残留 body 让下一个请求变成 501")
+            self.assertNotIn(b"<!DOCTYPE", r2.read())
+        finally:
+            conn.close()
+
+
+class TestBadInput(unittest.TestCase):
+    """畸形输入只能是 4xx。
+
+    以前 `_body()` 直接 `json.loads` 就返回，`[]`、`123` 都是合法 JSON，
+    后面每个接口都 `data.get(...)` → AttributeError 逃出 `do_POST`，
+    `BaseHTTPRequestHandler` 只把连接关掉 —— 客户端收到 RemoteDisconnected，
+    前端显示「网络错误」，终端里没有任何指向接口的线索。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.live = Live(with_key=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.live.stop()
+
+    def test_non_object_json_is_client_error(self):
+        for body in ([], 123, "x", True, [1, 2, 3]):
+            status, data = self.live.req("POST", "/api/conversations", body)
+            self.assertLess(status, 500, f"body={body!r} → {status} {data!r}")
+            self.assertEqual(status, 400, f"body={body!r} 应该 400，实际 {status}")
+
+    def test_non_string_fields_never_500(self):
+        cases = [
+            ("/api/setup", {"provider": ["x"], "api_key": "sk-x"}),
+            ("/api/setup", {"provider": "openrouter", "api_key": 12345}),
+            ("/api/conversations", {"members": 123, "title": ["x"]}),
+            ("/api/conversations", {"members": [1, None, {}], "title": {"a": 1}}),
+            ("/api/contacts", {"name": 123, "provider": {"a": 1}}),
+            ("/api/contacts", {"name": "x", "category": ["c"], "role": [1]}),
+        ]
+        for path, body in cases:
+            status, data = self.live.req("POST", path, body)
+            self.assertLess(status, 500, f"{path} body={body!r} → {status} {data!r}")
+
+    def test_patch_cannot_hijack_contact_id(self):
+        _, info = self.live.req("GET", "/api/info")
+        cid = info["contacts"][0]["id"]
+        status, _ = self.live.req(
+            "PATCH", f"/api/contacts/{cid}", {"cid": "hacked", "id": "hacked", "name": "新名字"}
+        )
+        self.assertEqual(status, 200, "PATCH 带 cid/id 键直接崩了")
+        _, info = self.live.req("GET", "/api/info")
+        ids = [c["id"] for c in info["contacts"]]
+        self.assertIn(cid, ids, "联系人 id 被 PATCH 改掉了")
+        self.assertNotIn("hacked", ids)
+        self.assertIn("新名字", [c["name"] for c in info["contacts"]], "合法字段也没改成功")
+
+    def test_bad_avatar_payload_is_400(self):
+        for payload in ("http://evil/x.png", "", None, 12345, "data:text/html;base64,xx"):
+            status, _ = self.live.req("POST", "/api/avatar/claude", {"data": payload})
+            self.assertLess(status, 500, f"头像 payload={payload!r} → {status}")
 
 
 if __name__ == "__main__":

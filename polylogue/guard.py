@@ -11,7 +11,13 @@ from dataclasses import dataclass
 
 __all__ = ["Budget", "StopReason", "novelty", "STOP_TEXT", "MAX_UNKNOWN_CALLS"]
 
-_WORD_RE = re.compile(r"[A-Za-z]{2,}|[\u4e00-\u9fff]")
+# 词袋：拉丁词（含单字母）、数字、中日韩单字。
+#
+# 以前是 `[A-Za-z]{2,}`，把单字母和数字全丢了 —— 于是
+# 「建议用方案 A」和「建议用方案 B」的词袋完全相同，novelty 判 0，
+# 「预计 3 天」和「预计 7 天」也一样。四个模型各自给了 A/B/C 方案，
+# 系统却报「这一轮的新信息都很少」直接停下。
+_WORD_RE = re.compile(r"[A-Za-z]+|\d+|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
 # 查不到价格的调用最多放行几次。查不到价格时成本是「不知道」，
 # 金额恒为 0，任何基于金额的上限都会失效 —— 只能按次数兜底。
@@ -99,6 +105,33 @@ def novelty(text: str, previous: list[str]) -> float:
     return len(fresh - seen) / len(fresh)
 
 
+# 收敛短语后面紧跟这些词，说明它是在**往下说**，不是在收尾。
+# 允许中间夹引号/句号（「没有异议」只是复述 → 短语后面是 `」只是`）。
+_CONTRAST = re.compile(
+    r"^[\s\u3000」』”\"'）)】\]。，,.;；:：]*"
+    r"(?:但|但是|不过|可是|然而|只是|的话|另外|我还有个|还要说|继续|"
+    r"however\b|but\b|yet\b|although\b)",
+    re.IGNORECASE,
+)
+
+
 def looks_converged(text: str) -> bool:
+    """这句话是不是在主张收敛。
+
+    纯子串匹配会把「他说『没有异议』只是复述别人的话」「没有更多补充的话
+    我就继续问下一个问题」「NO FURTHER COMMENTS 但我还要说一点」全判成收敛 ——
+    这些恰恰是在**继续**说。所以收敛短语后面紧跟转折词时不算数。
+    """
     lowered = text.lower()
-    return any(phrase.lower() in lowered for phrase in STOP_TEXT)
+    for phrase in STOP_TEXT:
+        needle = phrase.lower()
+        start = 0
+        while True:
+            i = lowered.find(needle, start)
+            if i < 0:
+                break
+            rest = lowered[i + len(needle) :]
+            if not _CONTRAST.match(rest):
+                return True
+            start = i + 1
+    return False

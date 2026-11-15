@@ -298,8 +298,7 @@ class TestFilePermissions(unittest.TestCase):
     def test_save_key_preserves_other_fields(self):
         """save_key 以前直接 write_text，会顺手把别的字段写坏。"""
         config.save({"api_keys": {}, "contacts": [{"id": "claude"}], "theme": "light"})
-        with mock.patch.object(credentials, "OWN_CONFIG", self.cfg):
-            credentials.save_key("openrouter", FAKE_KEY)
+        credentials.save_key("openrouter", FAKE_KEY)
         data = json.loads(self.cfg.read_text(encoding="utf-8"))
         self.assertEqual(data["api_keys"]["openrouter"], FAKE_KEY)
         self.assertEqual(data["contacts"], [{"id": "claude"}], "通讯录被写丢了")
@@ -307,8 +306,7 @@ class TestFilePermissions(unittest.TestCase):
 
     def test_save_key_empty_removes(self):
         config.save({"api_keys": {"openrouter": FAKE_KEY}})
-        with mock.patch.object(credentials, "OWN_CONFIG", self.cfg):
-            credentials.save_key("openrouter", "")
+        credentials.save_key("openrouter", "")
         data = json.loads(self.cfg.read_text(encoding="utf-8"))
         self.assertNotIn("openrouter", data["api_keys"])
 

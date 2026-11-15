@@ -26,10 +26,33 @@ __all__ = ["Turn", "Room", "MENTION_RE"]
 MENTION_RE = re.compile(
     r"@([A-Za-z0-9_\-\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+)"
 )
-_AT_ALL = re.compile(r"@all(?![A-Za-z0-9_\-])", re.IGNORECASE)
+# `@all` 前面不能紧贴字母数字：`a@all.com` 是邮箱，不是全员广播。
+_AT_ALL = re.compile(r"(?<![A-Za-z0-9._\-])@all(?![A-Za-z0-9_\-])", re.IGNORECASE)
 
 USER = "user"
 ALL = "all"
+
+# 中日韩文字没有词边界：`@小助手你好` 里「你」紧跟名字，但确实是在叫小助手。
+_CJK_RANGES = (
+    ("\u3040", "\u30ff"),  # 日文假名
+    ("\u3400", "\u4dbf"),  # CJK 扩展 A
+    ("\u4e00", "\u9fff"),  # CJK 基本区
+    ("\uac00", "\ud7af"),  # 韩文
+)
+
+
+def _is_cjk(ch: str) -> bool:
+    return any(lo <= ch <= hi for lo, hi in _CJK_RANGES)
+
+
+def _is_word_char(ch: str) -> bool:
+    """能接在名字后面、说明「这其实是另一个词」的字符。"""
+    return ch.isalnum() or ch in "_-"
+
+
+def _inside_email(text: str, at: int) -> bool:
+    """这个 `@` 是不是邮箱的一部分（前面紧贴字母数字/点/连字符）。"""
+    return at > 0 and (text[at - 1].isalnum() or text[at - 1] in "._-")
 
 
 @dataclass
@@ -104,10 +127,17 @@ class Room:
             start = lowered.find(needle)
             while start >= 0:
                 end = start + len(needle)
-                # 必须落在词边界：@gpt 不能命中 @gpt4
-                if end >= len(lowered) or not (
-                    lowered[end].isalnum() or lowered[end] in "_-"
-                ):
+                if _inside_email(lowered, start):
+                    # `bob@claude.ai` 里的 @claude 不是点名 —— 以前会把
+                    # claude 拉进对话，`a@all.com` 更狠，直接全员广播 N 次付费调用。
+                    start = lowered.find(needle, start + 1)
+                    continue
+                # 必须落在词边界：@gpt 不能命中 @gpt4。
+                # 但中日韩没有词边界，`@小助手你好` 后面紧跟汉字仍然是叫小助手。
+                if end >= len(lowered) or not _is_word_char(lowered[end]):
+                    hits.append((start, name))
+                    break
+                if _is_cjk(lowered[end - 1]) and _is_cjk(lowered[end]):
                     hits.append((start, name))
                     break
                 start = lowered.find(needle, start + 1)
@@ -125,8 +155,14 @@ class Room:
 
     def unmatched_mentions(self, text: str) -> list[str]:
         """写了 @ 但对不上任何成员的名字。用来给用户一个明确的提示。"""
+        text = text or ""
         out: list[str] = []
-        for raw in MENTION_RE.findall(text or ""):
+        for match in MENTION_RE.finditer(text):
+            if _inside_email(text, match.start()):
+                # `me@example.com` 不是点名。以前它会让整条消息一个模型都不发
+                # （next_speakers 看到 @ 就以为点名失败），用户完全摸不着头脑。
+                continue
+            raw = match.group(1)
             low = raw.lower()
             if low in (ALL, USER):
                 continue
@@ -134,8 +170,17 @@ class Room:
                 out.append(f"@{raw}")
         return out
 
+    def has_mention_syntax(self, text: str) -> bool:
+        """真的写了 @ 吗（排除邮箱里的 @）。"""
+        text = text or ""
+        return any(not _inside_email(text, m.start()) for m in MENTION_RE.finditer(text))
+
     def mentions_user(self, text: str) -> bool:
-        return USER in [m.lower() for m in MENTION_RE.findall(text)]
+        text = text or ""
+        return any(
+            m.group(1).lower() == USER and not _inside_email(text, m.start())
+            for m in MENTION_RE.finditer(text)
+        )
 
     def next_speakers(self, turn: Turn) -> list[str]:
         """这一轮之后，谁该开口。
@@ -150,7 +195,9 @@ class Room:
                 return named
             # 写了 @ 却一个成员都没对上（拼错、模型已下线、只写了 @user）：
             # 不要退化成全员广播 —— 一次误输入就是 N 次付费调用。
-            if "@" in (turn.content or ""):
+            # 用 has_mention_syntax 而不是 `"@" in content`：邮箱里的 @
+            # 不算点名，否则「发到 me@example.com」会让整条消息无人应答。
+            if self.has_mention_syntax(turn.content):
                 return []
             return list(self.members)
 

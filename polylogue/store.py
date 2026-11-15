@@ -218,10 +218,37 @@ def categories() -> list[str]:
 
 
 def contact_by_id(cid: str) -> dict | None:
-    for c in contacts():
+    """按 id 查联系人。
+
+    这是热路径：`/api/info` 里每个会话的每个成员都会查一次，几十次调用。
+    走 `load_shared()` 避免每次深拷贝整个 config（0.39 ms → 微秒级），
+    返回浅拷贝，调用方改不到缓存本体。
+    """
+    contacts = config.load_shared().get("contacts")
+    if isinstance(contacts, list) and all(isinstance(c, dict) for c in contacts):
+        for c in contacts:
+            if c.get("id") == cid:
+                return dict(c)
+        return None
+    # 字段类型坏了：交给 load_state() 修好默认值再查
+    for c in load_state()["contacts"]:
         if c.get("id") == cid:
             return c
     return None
+
+
+def _text(value, default: str = "") -> str:
+    """只接受字符串。别的类型退回默认值。
+
+    这些字段会流进 `PRESETS.get(provider)`、文件路径、正则 —— 存进一个
+    dict/list 的话，下一次加载会在别处炸，而且现场看起来跟这里毫无关系。
+    数字可以安全转成字符串（用户传 `{"model": 4}` 就当 "4"）。
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return default
 
 
 def add_contact(
@@ -234,18 +261,19 @@ def add_contact(
 ) -> dict:
     with _STATE_LOCK:
         state = load_state()
-        cid = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+        name = _text(name, "")
+        cid = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
         cid = cid or uuid.uuid4().hex[:8]
         if any(c.get("id") == cid for c in state["contacts"]):
             cid = f"{cid}-{uuid.uuid4().hex[:4]}"
         item = {
             "id": cid,
-            "name": (name or "").strip() or cid,
-            "provider": provider,
-            "model": model,
-            "category": category or "常用",
-            "role": role,
-            "base_url": base_url or "",
+            "name": name or cid,
+            "provider": _text(provider, "openrouter") or "openrouter",
+            "model": _text(model, ""),
+            "category": _text(category, "常用") or "常用",
+            "role": _text(role, ""),
+            "base_url": _text(base_url, ""),
         }
         state["contacts"].append(item)
         if item["category"] not in state["categories"]:
@@ -254,14 +282,24 @@ def add_contact(
         return item
 
 
-def update_contact(cid: str, **changes) -> dict | None:
+def update_contact(contact_id: str, **changes) -> dict | None:
+    # 参数名故意不叫 cid：`**changes` 里出现同名键会 TypeError
+    # （`update_contact(x, cid=...)` → got multiple values for argument）。
+    # 叫 contact_id 之后，客户端传什么键都只是被白名单忽略掉。
     with _STATE_LOCK:
         state = load_state()
         for c in state["contacts"]:
-            if c.get("id") == cid:
+            if c.get("id") == contact_id:
                 for k in ("name", "provider", "model", "category", "role", "base_url"):
-                    if k in changes and changes[k] is not None:
-                        c[k] = changes[k]
+                    if k not in changes or changes[k] is None:
+                        continue
+                    value = _text(changes[k], "")
+                    # 空名字/空 provider 会把联系人变得不可用，宁可不改
+                    if not value and k in ("name", "provider"):
+                        continue
+                    if not value and k == "category":
+                        value = "常用"
+                    c[k] = value
                 if c["category"] not in state["categories"]:
                     state["categories"].append(c["category"])
                 save_state(state)
@@ -342,35 +380,68 @@ def _turns_of(data: dict) -> list[dict]:
     return [t for t in turns if isinstance(t, dict)]
 
 
+def _summary_of(path: Path, data: dict) -> dict:
+    turns = _turns_of(data)
+    members = data.get("members")
+    return {
+        # id 以文件名为准：内容里的 id 和文件名不一致时（复制/改名/还原），
+        # 用内容里的 id 会出现「列表里有、点进去 404、删也删不掉」。
+        "id": path.stem,
+        "title": str(data.get("title") or "未命名"),
+        "kind": str(data.get("kind") or "group"),
+        "members": [str(m) for m in members] if isinstance(members, list) else [],
+        "category": str(data.get("category") or "常用"),
+        "turns": len(turns),
+        "updated": _as_float(data.get("updated")),
+        "last": _last_snippet({"turns": turns}),
+    }
+
+
+# 每个会话文件的摘要缓存，按 (mtime_ns, size) 校验。
+# 以前每次 list_conversations 都把每个会话的**完整 JSON** 解析一遍
+# （40 个会话实测 20 ms，/api/info 每次刷新都要跑），而这里只需要
+# 标题、条数、最后一句。文件变了指纹就对不上，外部改动也不会读到旧值。
+_SUMMARY_LOCK = threading.Lock()
+_SUMMARIES: dict[str, tuple[int, int, dict]] = {}
+
+
 def list_conversations() -> list[dict]:
     """只读摘要，不读转录 —— 列表里有几十个会话时这很重要。"""
     out: list[dict] = []
     folder = _conv_dir()
     if not folder.is_dir():
         return out
+
+    seen: set[str] = set()
     for path in folder.glob("*.json"):
+        key = str(path)
+        seen.add(key)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            st = path.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            continue
+        with _SUMMARY_LOCK:
+            hit = _SUMMARIES.get(key)
+        if hit and hit[0] == stamp[0] and hit[1] == stamp[1]:
+            out.append(dict(hit[2]))
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError):
             continue
         if not isinstance(data, dict):
             continue
-        turns = _turns_of(data)
-        members = data.get("members")
-        out.append(
-            {
-                # id 以文件名为准：内容里的 id 和文件名不一致时（复制/改名/还原），
-                # 用内容里的 id 会出现「列表里有、点进去 404、删也删不掉」。
-                "id": path.stem,
-                "title": str(data.get("title") or "未命名"),
-                "kind": str(data.get("kind") or "group"),
-                "members": [str(m) for m in members] if isinstance(members, list) else [],
-                "category": str(data.get("category") or "常用"),
-                "turns": len(turns),
-                "updated": _as_float(data.get("updated")),
-                "last": _last_snippet({"turns": turns}),
-            }
-        )
+        summary = _summary_of(path, data)
+        with _SUMMARY_LOCK:
+            _SUMMARIES[key] = (stamp[0], stamp[1], summary)
+        out.append(dict(summary))
+
+    # 删掉的会话要把缓存一起清掉，否则这个字典只涨不跌
+    with _SUMMARY_LOCK:
+        for stale in [k for k in _SUMMARIES if k not in seen]:
+            del _SUMMARIES[stale]
+
     # 排序键加 id 做次级比较：连续建两个对话时 updated 可能落在同一 tick，
     # 只按时间排的话列表顺序会随机跳，每次刷新都不一样。
     out.sort(key=lambda c: (-c["updated"], c["id"]))
@@ -395,7 +466,7 @@ def load_conversation(cid: str) -> dict | None:
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError):
         return None
     return data if isinstance(data, dict) else None
@@ -550,7 +621,7 @@ def load_avatar(cid: str) -> str | None:
     if not path.is_file():
         return None
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except OSError:
         return None
     return text if text.startswith("data:image/") else None

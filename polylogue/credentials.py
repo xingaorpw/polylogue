@@ -41,10 +41,8 @@ __all__ = [
     "credential_sources",
     "save_key",
     "DSH_CREDENTIALS",
-    "OWN_CONFIG",
 ]
 
-OWN_CONFIG = Path.home() / ".polylogue" / "config.json"
 DSH_CREDENTIALS = Path.home() / ".dsh" / ".credentials.yaml"
 
 # 认得的 key 名 → provider 名。PRESETS 里的 env 字段是主要来源，
@@ -61,7 +59,23 @@ _PREFERRED = ["openrouter", "openai", "claude", "gemini", "grok", "deepseek"]
 
 # 长得像 key 的东西。用来兜住「不知道具体值但一看就是 key」的泄漏，
 # 比如上游错误响应体里回显了我们不认识的凭据。
-_KEY_SHAPE = re.compile(r"\b(?:sk|pk|gsk|xai|api)[-_][A-Za-z0-9_\-]{12,}")
+#
+# 下限给到 24：真实 key 都远超这个长度（OpenAI 48+、OpenRouter 70+、
+# Groq 52+），而 `api-key-rotation-policy`、`sk-learn-pipeline-2026`
+# 这类**普通标识符**只有 18–19 个字符 —— 下限 12 会把它们一起打成
+# 「已隐藏」，日志变得读不懂，还会误导排查方向。
+_KEY_SHAPE = re.compile(
+    r"\b(?:sk|pk|gsk|xai|api)[-_][A-Za-z0-9_\-]{24,}"  # OpenAI / Anthropic / Groq / xAI / OpenRouter
+    r"|\bAIza[0-9A-Za-z_\-]{35,}"  # Google
+    r"|\bhf_[A-Za-z0-9]{30,}"  # HuggingFace
+    r"|\bnvapi-[A-Za-z0-9_\-]{20,}"  # NVIDIA
+    r"|\bpplx-[A-Za-z0-9]{20,}"  # Perplexity
+)
+# URL 里的 key：`?key=...` / `&api_key=...`。上游报错经常把整个请求 URL
+# 回显出来，而这种 key 不带任何可识别前缀，正则兜底抓不到。
+_KEY_QUERY = re.compile(
+    r"([?&](?:key|api_key|apikey|token|access_token|secret)=)[^&\s\"'<>]+", re.I
+)
 _HIDDEN = "sk-…（已隐藏）"
 
 
@@ -96,6 +110,11 @@ def redact(text: str, secrets=None) -> str:
         if isinstance(value, str) and len(value) >= 8 and value in text:
             text = text.replace(value, _HIDDEN)
 
+    # 先处理 query 里的 key（它没有可识别前缀，只能靠位置认），
+    # 再跑形状兜底 —— 顺序反了的话 `?key=sk-xxx` 会先被形状规则替换成
+    # `?key=sk-…（已隐藏）`，query 规则就匹配不上了（不影响安全，但会留下
+    # 半截 key 前缀在日志里）。
+    text = _KEY_QUERY.sub(lambda m: m.group(1) + _HIDDEN, text)
     return _KEY_SHAPE.sub(_HIDDEN, text)
 
 
@@ -172,10 +191,10 @@ def _from_env() -> dict[str, str]:
 
 
 def _from_own_config() -> dict[str, str]:
-    if not OWN_CONFIG.is_file():
+    if not config.CONFIG_PATH.is_file():
         return {}
     try:
-        data = json.loads(OWN_CONFIG.read_text(encoding="utf-8"))
+        data = json.loads(config.CONFIG_PATH.read_text(encoding="utf-8-sig"))
     except (ValueError, OSError):
         return {}
     keys = data.get("api_keys")
@@ -190,7 +209,7 @@ def _from_dsh() -> dict[str, str]:
     if not DSH_CREDENTIALS.is_file():
         return {}
     try:
-        refs = _parse_dsh_refs(DSH_CREDENTIALS.read_text(encoding="utf-8", errors="replace"))
+        refs = _parse_dsh_refs(DSH_CREDENTIALS.read_text(encoding="utf-8-sig", errors="replace"))
     except OSError:
         return {}
 
@@ -206,14 +225,21 @@ def _from_dsh() -> dict[str, str]:
 
 
 def credential_sources() -> dict[str, str]:
-    """{provider: 来源说明}，用于在界面上告诉用户「这个 key 是哪来的」。"""
+    """{provider: 来源说明}，用于在界面上告诉用户「这个 key 是哪来的」。
+
+    顺序必须和 `discover()` 的覆盖顺序一致，否则 `--whoami` 会显示
+    **env 的掩码配 config 的来源**：env 和 config 都有 openrouter 时，
+    用户看到的是环境变量的 key，却被告知「来自 polylogue 配置」，
+    然后照着提示去改配置，怎么改都没用。
+    """
     sources = {}
-    for name in _from_env():
-        sources[name] = "环境变量"
+    # 优先级从低到高覆盖，最后写的最优先
+    for name in _from_dsh():
+        sources[name] = "复用 DSH 凭据"
     for name in _from_own_config():
         sources[name] = "polylogue 配置"
-    for name in _from_dsh():
-        sources.setdefault(name, "复用 DSH 凭据")
+    for name in _from_env():
+        sources[name] = "环境变量"
     return sources
 
 
@@ -242,23 +268,31 @@ def save_key(provider: str, api_key: str) -> None:
     走 `config.write_json_atomic`：原子写 + fsync + 收紧权限。
     以前这里是直接 `write_text`，崩在中间会把整个 config 写坏 ——
     连带里面的通讯录和分类一起丢。
+
+    整个读-改-写必须持 `config._WRITE_LOCK`：不持锁的话，`--login` 在慢盘上
+    读到旧快照 → 另一线程 `config.update(theme=...)` 落盘 → 这里再写，
+    就把对方的改动整段覆盖掉了（实测 theme 被写回 None）。
     """
-    data = {}
-    if OWN_CONFIG.is_file():
-        try:
-            data = json.loads(OWN_CONFIG.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            data = {}
-    if not isinstance(data, dict):
+    with config._WRITE_LOCK:
         data = {}
+        if config.CONFIG_PATH.is_file():
+            try:
+                # utf-8-sig：BOM 会让 json.loads 报错，然后这里会把整份
+                # 配置当成空的，用 `{"api_keys": {...}}` 覆盖掉 ——
+                # 通讯录、成员、主题全丢，还报「保存成功」。
+                data = json.loads(config.CONFIG_PATH.read_text(encoding="utf-8-sig"))
+            except (ValueError, OSError):
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
 
-    keys = data.get("api_keys")
-    if not isinstance(keys, dict):
-        keys = {}
-    if api_key:
-        keys[provider] = api_key
-    else:
-        keys.pop(provider, None)
-    data["api_keys"] = keys
+        keys = data.get("api_keys")
+        if not isinstance(keys, dict):
+            keys = {}
+        if api_key:
+            keys[provider] = api_key
+        else:
+            keys.pop(provider, None)
+        data["api_keys"] = keys
 
-    config.write_json_atomic(OWN_CONFIG, data)
+        config.write_json_atomic(config.CONFIG_PATH, data)

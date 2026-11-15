@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import re
+from collections import deque
 
 __all__ = ["estimate_tokens", "summarize", "compress", "CJK_RE"]
 
@@ -30,6 +31,12 @@ EMOJI_RE = re.compile(r"[\U0001f300-\U0001faff\u2600-\u27bf]")
 
 _SENT_END = re.compile(r"[。！？!?\n]")
 
+# 和 room.MENTION_RE 保持一致的字符集（这里不能 import room：room 反过来
+# import 本模块，会成环）
+_MENTION_RE = re.compile(
+    r"@([A-Za-z0-9_\-\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+)"
+)
+
 
 def estimate_tokens(text: str) -> int:
     """粗估 token 数。不追求精确，只要求「方向对、不低估」。
@@ -43,7 +50,10 @@ def estimate_tokens(text: str) -> int:
     rest = EMOJI_RE.sub("", text) if emoji else text
     cjk = len(CJK_RE.findall(rest))
     other = len(rest) - cjk
-    return int(cjk + emoji * 2 + other / 4 + 0.5)
+    # `max(1, ...)`：非空文本至少要算 1 个 token。`estimate_tokens("a")`
+    # 以前返回 0，`"𠀀"`（CJK 扩展 B 区，落在「其它」里按 4 字符 1 token）
+    # 也是 0 —— 一串这样的字符会算出 0 token，预算判断整个失效。
+    return max(1, int(cjk + emoji * 2 + other / 4 + 0.5))
 
 
 def _first_sentence(text: str, limit: int = 60) -> str:
@@ -62,9 +72,14 @@ def _first_sentence(text: str, limit: int = 60) -> str:
 
 
 def _mentions(text: str) -> list[str]:
-    """提取 @名字，去重保序。交接关系是压缩时必须保住的信息。"""
+    """提取 @名字，去重保序。交接关系是压缩时必须保住的信息。
+
+    字符集必须和 room.MENTION_RE 一致：联系人可以叫「小助手」，
+    只认 ASCII 的话 `@小助手` 会在压缩时被悄悄抹掉 —— 而那正是
+    「谁该接话」的信息，恰好是压缩最该保住的东西。
+    """
     seen, out = set(), []
-    for m in re.finditer(r"@([A-Za-z0-9_-]+)", text):
+    for m in _MENTION_RE.finditer(text):
         name = m.group(1)
         if name.lower() not in seen:
             seen.add(name.lower())
@@ -74,7 +89,8 @@ def _mentions(text: str) -> list[str]:
 
 def summarize(turns: list) -> str:
     """把一组较早的发言压成多行摘要。"""
-    return "\n".join(_line_for(t) for t in turns if _line_for(t))
+    lines = [_line_for(t) for t in turns]
+    return "\n".join(line for line in lines if line)
 
 
 def _line_for(turn) -> str:
@@ -145,23 +161,41 @@ def compress(
         """
         return len(older) - len(lines) + dropped_recent
 
-    def build() -> str:
+    def header() -> str:
         n = omitted()
-        head = f"（更早的 {n} 条发言已省略）\n" if n else ""
-        return head + "\n".join(lines)
+        return f"（更早的 {n} 条发言已省略）\n" if n else ""
+
+    def build() -> str:
+        return header() + "\n".join(lines)
 
     if budget_tokens is not None:
-        while estimate_tokens(build()) + recent_tokens > budget_tokens:
+        # 必须增量算，不能每轮重建整个摘要再重新估 token：
+        # 那样是 O(n²)，实测 800 条要 743 ms，而这段代码每个成员
+        # 每轮都会跑一次（5 个成员就是 3.7 秒纯 CPU，卡在请求线程里）。
+        lines = deque(lines)
+        per_line = deque(estimate_tokens(line) for line in lines)
+        sum_line = sum(per_line)
+        recent = deque(recent)
+
+        def digest_est() -> int:
+            # 逐行估再相加会比整串略大（每行 other/4 各自向上取整），
+            # 偏保守 —— 宁可多丢一行也不要超出硬上限
+            return estimate_tokens(header()) + sum_line + max(0, len(lines) - 1)
+
+        while digest_est() + recent_tokens > budget_tokens:
             if lines:
-                lines.pop(0)  # 先丢最老的摘要行
+                sum_line -= per_line.popleft()
+                lines.popleft()  # 先丢最老的摘要行
             elif recent:
                 # 摘要行丢完了还超预算，只能从 recent 最老的开始丢 ——
                 # 否则「硬上限」就是假的（recent 自身超预算时永远不收敛）
-                recent = recent[1:]
+                recent_tokens -= estimate_tokens(recent.popleft().content or "")
                 dropped_recent += 1
-                recent_tokens = sum(estimate_tokens(t.content or "") for t in recent)
             else:
                 break
+
+        lines = list(lines)
+        recent = list(recent)
 
     digest = build()
     digest_tokens = estimate_tokens(digest)
