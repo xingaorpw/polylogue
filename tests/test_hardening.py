@@ -1005,7 +1005,10 @@ class TestBuildAllDedupes(unittest.TestCase):
             {"name": "a", "provider": "openrouter", "model": "x"},
             {"name": "a", "provider": "openrouter", "model": "x"},
         ]
-        providers, active, skipped = bootstrap.build_all(rows)
+        # 必须自己喂 key：否则这台机器上有没有 OPENROUTER_API_KEY 会决定
+        # 成员建不建得出来，测试在本地过、CI 上挂（真发生过一次）。
+        with mock.patch.object(bootstrap, "discover", return_value={"openrouter": "sk-or-v1-" + "a" * 40}):
+            providers, active, skipped = bootstrap.build_all(rows)
         self.assertEqual(active, ["a"], "同名成员被建了两次，会双倍付费")
         self.assertTrue(any("重名" in s for s in skipped), skipped)
 
