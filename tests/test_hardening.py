@@ -724,6 +724,19 @@ class TestConfigCache(TmpHome):
         store.rename_conversation(conv["id"], "新名字")
         self.assertEqual(store.list_conversations()[0]["title"], "新名字")
 
+    def test_repeated_equal_length_renames_are_visible(self):
+        """等长改名必须每次都看得到新标题。
+
+        摘要缓存只按 (mtime_ns, size) 校验是不够的：文件系统时钟精度可能粗到
+        几毫秒，而「旧名字」→「新名字」字节数完全一样，两次写落进同一个 tick
+        时指纹相同，列表就一直显示旧标题。这条在 py3.9 的 CI 上真的挂过。
+        """
+        conv = store.create_conversation("旧名字", ["claude"])
+        for i in range(10):
+            want = f"名{i:02d}字"
+            store.rename_conversation(conv["id"], want)
+            self.assertEqual(store.list_conversations()[0]["title"], want, f"第 {i} 次改名没生效")
+
 
 class TestStoreRejectsBadTypes(TmpHome):
     """store 不该把非字符串字段落盘。

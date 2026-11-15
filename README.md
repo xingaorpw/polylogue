@@ -1,7 +1,7 @@
 # polylogue
 
 [![CI](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml/badge.svg)](https://github.com/xingaorpw/polylogue/actions/workflows/ci.yml)
-![tests](https://img.shields.io/badge/tests-409%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-410%20passing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![deps](https://img.shields.io/badge/dependencies-0-success)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -338,10 +338,10 @@ polylogue --forget openrouter  # 删掉
 python -m unittest discover -s tests -t .
 ```
 
-409 个测试，全部离线（用假上游，不打真实 API）。真实输出：
+410 个测试，全部离线（用假上游，不打真实 API）。真实输出：
 
 ```
-Ran 409 tests in 13.368s
+Ran 410 tests in 12.370s
 
 OK (skipped=1)
 ```

@@ -172,6 +172,12 @@ def _atomic_write(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+    # 自己写完立刻让摘要缓存失效。
+    #
+    # 只靠 (mtime_ns, size) 判断是不行的：文件系统的时钟精度可能粗到几毫秒，
+    # 而「旧名字」→「新名字」这种等长改名的字节数也一样，两次写落进同一个
+    # tick 时指纹完全相同 —— 界面上连续改两次名，列表一直显示旧标题。
+    _bump_summaries()
 
 
 # ---------------------------------------------------------------- 通讯录
@@ -402,7 +408,16 @@ def _summary_of(path: Path, data: dict) -> dict:
 # （40 个会话实测 20 ms，/api/info 每次刷新都要跑），而这里只需要
 # 标题、条数、最后一句。文件变了指纹就对不上，外部改动也不会读到旧值。
 _SUMMARY_LOCK = threading.Lock()
-_SUMMARIES: dict[str, tuple[int, int, dict]] = {}
+_SUMMARIES: dict[str, tuple[int, int, int, dict]] = {}
+# 本进程内的写次数，进缓存指纹。等长改名 + 粗粒度 mtime 时只有它能把
+# 新旧两次写区分开（详见 _atomic_write 的注释）。
+_SUMMARY_GEN = 0
+
+
+def _bump_summaries() -> None:
+    global _SUMMARY_GEN
+    with _SUMMARY_LOCK:
+        _SUMMARY_GEN += 1
 
 
 def list_conversations() -> list[dict]:
@@ -423,8 +438,9 @@ def list_conversations() -> list[dict]:
             continue
         with _SUMMARY_LOCK:
             hit = _SUMMARIES.get(key)
-        if hit and hit[0] == stamp[0] and hit[1] == stamp[1]:
-            out.append(dict(hit[2]))
+            gen = _SUMMARY_GEN
+        if hit and hit[0] == stamp[0] and hit[1] == stamp[1] and hit[2] == gen:
+            out.append(dict(hit[3]))
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -434,7 +450,7 @@ def list_conversations() -> list[dict]:
             continue
         summary = _summary_of(path, data)
         with _SUMMARY_LOCK:
-            _SUMMARIES[key] = (stamp[0], stamp[1], summary)
+            _SUMMARIES[key] = (stamp[0], stamp[1], gen, summary)
         out.append(dict(summary))
 
     # 删掉的会话要把缓存一起清掉，否则这个字典只涨不跌
